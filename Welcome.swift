@@ -62,9 +62,19 @@ final class EngineStatus {
 }
 
 struct WelcomeView: View {
-    var onStart: () -> Void
+    var onStart: () -> Void = {}
     @Bindable var status = EngineStatus.shared
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(Project.self) private var project
+
+    /// Opens the muxer window and closes this one (also when a file arrives from the Finder while the welcome is up)
+    func start() {
+        onStart()
+        openWindow(id: "main")
+        dismissWindow(id: "welcome")
+    }
 
     var body: some View {
         ZStack {
@@ -92,7 +102,7 @@ struct WelcomeView: View {
                 .frame(maxWidth: 980)
                 .padding(.horizontal, DS.margin)
                 Spacer(minLength: 20)
-                Button(action: onStart) {
+                Button(action: start) {
                     Text("Start").font(.title3.weight(.semibold)).foregroundStyle(.white)
                         .frame(minWidth: 200).padding(.vertical, 11).padding(.horizontal, 24)
                         .background(Capsule().fill(Color.accentColor.gradient))
@@ -104,7 +114,9 @@ struct WelcomeView: View {
                 Text("Abdala Brothers").font(.caption).foregroundStyle(.tertiary).padding(.top, 14).padding(.bottom, 20)
             }
         }
+        .frame(width: 1180, height: 820)
         .onAppear { status.loadVersions() }
+        .onChange(of: project.tracks.count) { _, n in if n > 0 { start() } }
     }
 
     func engineRow(_ e: Engine) -> some View {
