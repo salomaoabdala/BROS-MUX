@@ -17,7 +17,7 @@ Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App 
 Requer macOS 14 (Sonoma) ou mais novo. O instalador cuida do resto (Homebrew, engines e o app):
 
 ```bash
-git clone https://github.com/<seu-usuario>/BROS-MUX.git && cd BROS-MUX && ./install.sh
+git clone https://github.com/salomaoabdala/BROS-MUX.git && cd BROS-MUX && ./install.sh
 ```
 
 O `install.sh`:
