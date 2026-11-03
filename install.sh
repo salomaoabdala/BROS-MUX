@@ -11,6 +11,7 @@
 # Usage:  ./install.sh            (from the folder of the repository)
 #         ./install.sh --build    (always build from source, ignore the zip)
 set -e
+setopt null_glob            # a glob with no match expands to nothing instead of aborting the command
 cd "$(dirname "$0")"
 
 say() { print -P "%F{blue}==>%f $*" }
