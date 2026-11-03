@@ -1,0 +1,14 @@
+# build output and release zips
+build/
+dist/
+*.zip
+
+# editor and Finder
+.DS_Store
+*.swp
+
+# local backups and session markers
+*.bak_design
+*.bak
+*_old.icns
+.redesign-go

@@ -1,0 +1,70 @@
+FILE: /Users/salomaoabdala/Documents/Abdala Brothers/2DIE4/OSCARS/ARQUIVO FINAL/02 - ATMOS ACADEMY v2 SYNC CORRIGIDO (H.264 4K 24fps + Dolby Atmos E-AC-3 JOC 768k + PCM 5.1 24-bit 48kHz)/2DIE4_FTR_4K_H264_ATMOS_PCM51_EN-US.mov · 4096x2160 h264 yuv420p · 24.000 fps · 86574 frames analysed · TC 00:00:00:00 · audio eac3 6ch, pcm_s24le 6ch · 529 s
+FINDINGS: 68 · errors 0 · warnings 4
+  ⚠ 00:21:35:05 f31085 Audio dropout: track 2: 544.1 ms of digital silence in 3 of 6 channels at once (-37 dBFS just before) — the other channels keep playing: a mix decision unless the picture drops too
+  ⚠ 00:21:36:09 f31113 Audio dropout: track 2: 417.3 ms of digital silence in 3 of 6 channels at once (-37 dBFS just before) — the other channels keep playing: a mix decision unless the picture drops too
+  ⚠ 00:55:20:12 f79692 Repeated frame: frame 79692 repeats frame 79691 (1 time) while the shot is moving — a dropped or duplicated frame
+  ⚠ 00:58:55:11 f84851 Block artifact: 4 of 144 tiles turn into a flat patch for one frame and come back (rows 3,4,5) — a block of garbage or a missing texture
+  · 00:00:00:00 f0 Black frame: 0.42 s of black at the head
+  · 00:00:05:21 f141 Black frame: 25.83 s of black inside the programme (a fade or a planned black?)
+  · 00:00:39:12 f948 Black frame: 0.42 s of black inside the programme (a fade or a planned black?)
+  · 00:00:48:18 f1170 Black frame: 4.88 s of black inside the programme (a fade or a planned black?)
+  · 00:02:01:18 f2922 Black frame: 28.67 s of black inside the programme (a fade or a planned black?)
+  · 00:02:37:19 f3787 Black frame: 15.38 s of black inside the programme (a fade or a planned black?)
+  · 00:02:53:06 f4158 Solid-colour frame: 2 flat frames of one colour (R 15 G 17 B 17)
+  · 00:05:05:05 f7325 Solid-colour frame: 6 flat red/orange frames (no “Media Offline” text on it; text read: - pace is good, pace is really good -)
+  · 00:07:15:19 f10459 Black frame: 4.46 s of black inside the programme (a fade or a planned black?)
+  · 00:09:38:15 f13887 Repeated frame: 10 repeated frames between 00:09:38:15 and 00:09:41:13 (one every 7.8 frames): the cadence of footage converted from another frame rate — the source, not the render
+  · 00:18:56:19 f27283 Solid-colour frame: 2 flat red/orange frames (no “Media Offline” text on it)
+  · 00:18:56:22 f27286 Solid-colour frame: 2 flat red/orange frames (no “Media Offline” text on it)
+  · 00:18:57:02 f27290 Solid-colour frame: 1 flat red/orange frame (no “Media Offline” text on it)
+  · 00:21:28:12 f30924 Black frame: 11.38 s of black inside the programme (a fade or a planned black?)
+  · 00:21:31:13 f30997 Audio dropout: track 2: 6.3 ms of digital silence in channel 3 (-43 dBFS just before) — in one channel only: usually the gap between two clips of the mix, not a fault
+  · 00:24:28:19 f35251 Black frame: 3.67 s of black inside the programme (a fade or a planned black?)
+  · 00:26:20:21 f37941 Black frame: 2.96 s of black inside the programme (a fade or a planned black?)
+  · 00:26:26:11 f38075 Black frame: 0.29 s of black inside the programme (a fade or a planned black?)
+  · 00:26:30:00 f38160 Black frame: 1.00 s of black inside the programme (a fade or a planned black?)
+  · 00:26:33:10 f38242 Black frame: 0.42 s of black inside the programme (a fade or a planned black?)
+  · 00:26:36:16 f38320 Black frame: 0.79 s of black inside the programme (a fade or a planned black?)
+  · 00:26:44:06 f38502 Black frame: 1.00 s of black inside the programme (a fade or a planned black?)
+  · 00:26:45:11 f38531 Black frame: 0.08 s of black inside the programme (a fade or a planned black?)
+  · 00:29:25:14 f42374 Audio dropout: track 2: 4.5 ms of digital silence in channel 4 (-37 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:29:25:15 f42375 Audio dropout: track 2: 4376.2 ms of digital silence in channel 4 (-38 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:30:24:22 f43798 Audio dropout: track 2: 90083.6 ms of digital silence in channel 4 (-41 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:30:24:22 f43798 Audio dropout: track 1: 90103.3 ms of digital silence in channel 4 (-43 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:36:01:05 f51869 Audio dropout: track 2: 9402.9 ms of digital silence in channel 4 (-39 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:36:29:08 f52544 Audio dropout: track 2: 6.5 ms of digital silence in channel 4 (-29 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:36:29:10 f52546 Audio dropout: track 2: 60373.0 ms of digital silence in channel 4 (-31 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:36:29:22 f52558 Black frame: 2.67 s of black inside the programme (a fade or a planned black?)
+  · 00:36:59:12 f53268 Black frame: 6.21 s of black inside the programme (a fade or a planned black?)
+  · 00:37:25:20 f53900 Black frame: 3.92 s of black inside the programme (a fade or a planned black?)
+  · 00:37:49:02 f54458 Black frame: 2.17 s of black inside the programme (a fade or a planned black?)
+  · 00:38:53:04 f55996 Audio dropout: track 2: 891.5 ms of digital silence in channel 4 (-39 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:38:56:02 f56066 Audio dropout: track 2: 1329.5 ms of digital silence in channel 4 (-33 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:38:59:17 f56153 Audio dropout: track 2: 1359.7 ms of digital silence in channel 4 (-37 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:39:02:15 f56223 Black frame: 8.92 s of black inside the programme (a fade or a planned black?)
+  · 00:39:03:00 f56232 Audio dropout: track 2: 121157.0 ms of digital silence in channel 4 (-39 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:42:54:18 f61794 Black frame: 13.88 s of black inside the programme (a fade or a planned black?)
+  · 00:43:33:09 f62721 Solid-colour frame: 2 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:33:23 f62735 Solid-colour frame: 3 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:34:20 f62756 Solid-colour frame: 2 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:34:23 f62759 Solid-colour frame: 1 flat red/orange frame (no “Media Offline” text on it)
+  · 00:43:35:02 f62762 Solid-colour frame: 6 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:35:15 f62775 Solid-colour frame: 4 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:36:07 f62791 Solid-colour frame: 4 flat red/orange frames (no “Media Offline” text on it; text read: ak*)
+  · 00:43:40:08 f62888 Solid-colour frame: 1 flat red/orange frame (no “Media Offline” text on it)
+  · 00:43:40:21 f62901 Solid-colour frame: 2 flat red/orange frames (no “Media Offline” text on it; text read: i)
+  · 00:43:41:05 f62909 Solid-colour frame: 1 flat red/orange frame (no “Media Offline” text on it)
+  · 00:43:41:09 f62913 Solid-colour frame: 4 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:42:01 f62929 Solid-colour frame: 4 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:42:13 f62941 Solid-colour frame: 5 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:43:02 f62954 Solid-colour frame: 7 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:43:16 f62968 Solid-colour frame: 5 flat red/orange frames (no “Media Offline” text on it)
+  · 00:43:44:07 f62983 Solid-colour frame: 5 flat red/orange frames (no “Media Offline” text on it; text read: i)
+  · 00:43:44:12 f62988 Black frame: 5.12 s of black inside the programme (a fade or a planned black?)
+  · 00:43:58:17 f63329 Black frame: 2.29 s of black inside the programme (a fade or a planned black?)
+  · 00:44:11:00 f63624 Black frame: 2.12 s of black inside the programme (a fade or a planned black?)
+  · 00:47:01:09 f67713 Audio dropout: track 2: 16677.3 ms of digital silence in channel 4 (-41 dBFS just before) — the LFE alone: it carries nothing here, which is normal
+  · 00:50:25:03 f72603 Black frame: 52.46 s of black inside the programme (a fade or a planned black?)
+  · 00:52:43:01 f75913 Black frame: 22.71 s of black inside the programme (a fade or a planned black?)
+  · 00:55:24:17 f79793 Repeated frame: 16 repeated frames between 00:55:24:17 and 00:55:31:03 (one every 10.3 frames): the cadence of footage converted from another frame rate — the source, not the render
+  · 01:00:02:14 f86462 Black frame: 4.67 s of black at the tail
