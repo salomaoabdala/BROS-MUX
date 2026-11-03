@@ -8,7 +8,7 @@ import AppKit
 /// Name and version shown in the window title, the welcome screen, the reports and the Finder (build.sh writes the same
 /// version into Info.plist — keep the two in step).
 enum AppInfo {
-    static let version = "1.3"
+    static let version = "1.4"
     static let name = "BROS-MUX (v.\(version))"
 }
 
@@ -20,6 +20,13 @@ enum DS {
     static let tile: CGFloat = 28            // Settings-style icon tile
     static let inspectorWidth: CGFloat = 400
     static let sidebarWidth: CGFloat = 200
+
+    /// The frame of a big sheet: its designed size, shrunk to what the screen can show. A MacBook screen is 982 points
+    /// tall; a sheet taller than that is clipped by macOS and its Done button is out of reach.
+    static func sheet(_ width: CGFloat, _ height: CGFloat) -> CGSize {
+        let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: width, height: height)
+        return CGSize(width: min(width, screen.width - 48), height: min(height, screen.height - 48))
+    }
 
     /// Fill of a grouped container in a free layout: white-ish in light mode, one step lighter than the window in dark mode
     static let groupFill = Color(nsColor: NSColor(name: nil) { a in
@@ -125,6 +132,14 @@ struct TerminalBox: View {
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
+    }
+}
+
+extension View {
+    /// A picker in a sheet header: segments while there are a few choices, a pop-up menu beyond that
+    /// (a segmented control with dozens of tracks runs over the whole header)
+    @ViewBuilder func headerPickerStyle(count: Int) -> some View {
+        if count <= 4 { pickerStyle(.segmented) } else { pickerStyle(.menu) }
     }
 }
 

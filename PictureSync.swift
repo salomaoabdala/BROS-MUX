@@ -599,9 +599,11 @@ struct PictureSyncSheet: View {
             SheetHeader(title: "Picture Sync Check", subtitle: model.picture.lastPathComponent) {
                 if !model.isOutput, model.targets.count > 1 {
                     Picker("", selection: Binding(get: { model.targetID }, set: { model.targetID = $0; model.refreshTarget() })) {
-                        ForEach(model.targets) { Text($0.title).tag(Optional($0.id)) }
+                        ForEach(model.targets) { t in
+                            Text(model.targets.count > 4 ? "\(t.title) · \(t.url.lastPathComponent)" : t.title).tag(Optional(t.id))
+                        }
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 420).disabled(model.measuring)
+                    .headerPickerStyle(count: model.targets.count).labelsHidden().frame(maxWidth: 420).disabled(model.measuring)
                 }
                 if model.measuring {
                     ProgressView(value: model.progress).frame(width: 160)
@@ -629,7 +631,7 @@ struct PictureSyncSheet: View {
                 }
             }
         }
-        .frame(width: 1280, height: standalone ? 1060 : 980)
+        .frame(width: DS.sheet(1280, standalone ? 1060 : 980).width, height: DS.sheet(1280, standalone ? 1060 : 980).height)
         .onAppear { if !standalone && !model.hasMeasurement { model.measure() } }
         .onDisappear { model.stopPlayer() }
     }

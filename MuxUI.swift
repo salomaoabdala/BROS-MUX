@@ -246,7 +246,7 @@ struct TrackListView: View {
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 4, leading: DS.margin, bottom: DS.rowGap, trailing: DS.margin))
                         ForEach($project.tracks) { $t in
-                            TrackRow(track: $t, compact: geo.size.width < 990)
+                            TrackRow(track: $t, compact: geo.size.width < 990, narrow: geo.size.width < 640)
                         }
                         .onMove { project.tracks.move(fromOffsets: $0, toOffset: $1) }
                         .moveDisabled(project.busy)
@@ -270,6 +270,8 @@ struct TrackRow: View {
     @Binding var track: Track
     /// Narrow list: the fields go under the description. Decided once per list width, not measured per row.
     var compact = false
+    /// Narrowest list (inspector open at the window's minimum width): the fields in two rows
+    var narrow = false
 
     var isReference: Bool { project.syncReferenceID == track.id }
 
@@ -340,36 +342,59 @@ struct TrackRow: View {
     }
 
     var fields: some View {
-        HStack(alignment: .bottom, spacing: 12) {
-            field("Track name", width: 170) {
-                TextField("Name", text: $track.title).textFieldStyle(.roundedBorder)
-            }
-            if track.kind == .timecode {
-                Color.clear.frame(width: 150 + 96 + 64 + 24, height: 1)
+        Group {
+            if narrow {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .bottom, spacing: 12) { nameField; if track.kind != .timecode { languageField } }
+                    if track.kind != .timecode { HStack(alignment: .bottom, spacing: 12) { trimField; defaultField } }
+                }
             } else {
-                field("Language", width: 150) {
-                    Picker("", selection: $track.language) {
-                        ForEach(languageOptions, id: \.0) { Text($0.1).tag($0.0) }
-                    }
-                    .labelsHidden()
-                }
-                field("Head trim (ms)", width: 96) {
-                    if track.canTrim {
-                        TextField("0", value: $track.trimStartMs, format: .number.precision(.fractionLength(0...3)))
-                            .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing)
-                            .help("How much to cut from the start to sync (negative adds silence — PCM only). Filled in by “Align”.")
+                HStack(alignment: .bottom, spacing: 12) {
+                    nameField
+                    if track.kind == .timecode {
+                        Color.clear.frame(width: 150 + 96 + 64 + 24, height: 1)
                     } else {
-                        Text("—").foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
+                        languageField; trimField; defaultField
                     }
-                }
-                field("Default", width: 64) {
-                    Toggle("On", isOn: $track.enabled).toggleStyle(.checkbox)
-                        .help("Track enabled by default in players")
                 }
             }
         }
         .controlSize(.small)
         .disabled(!track.include)
+    }
+
+    var nameField: some View {
+        field("Track name", width: 170) {
+            TextField("Name", text: $track.title).textFieldStyle(.roundedBorder)
+        }
+    }
+
+    var languageField: some View {
+        field("Language", width: 150) {
+            Picker("", selection: $track.language) {
+                ForEach(languageOptions, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden()
+        }
+    }
+
+    var trimField: some View {
+        field("Head trim (ms)", width: 96) {
+            if track.canTrim {
+                TextField("0", value: $track.trimStartMs, format: .number.precision(.fractionLength(0...3)))
+                    .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing)
+                    .help("How much to cut from the start to sync (negative adds silence — PCM only). Filled in by “Align”.")
+            } else {
+                Text("—").foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+    }
+
+    var defaultField: some View {
+        field("Default", width: 64) {
+            Toggle("On", isOn: $track.enabled).toggleStyle(.checkbox)
+                .help("Track enabled by default in players")
+        }
     }
 
     var remove: some View {

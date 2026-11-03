@@ -269,9 +269,11 @@ struct SyncViewerSheet: View {
             SheetHeader(title: "Sync Viewer", subtitle: model.target.map { "\($0.title) · \($0.url.lastPathComponent)" }) {
                 if model.targets.count > 1 {
                     Picker("", selection: $model.targetID) {
-                        ForEach(model.targets) { Text($0.title).tag($0.id) }
+                        ForEach(model.targets) { t in
+                            Text(model.targets.count > 4 ? "\(t.title) · \(t.url.lastPathComponent)" : t.title).tag(t.id)
+                        }
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 420)
+                    .headerPickerStyle(count: model.targets.count).labelsHidden().frame(maxWidth: 420)
                     .onChange(of: model.targetID) { model.nudge = 0; model.reload() }
                 }
                 if model.measuring { ProgressView().controlSize(.small); Text("Measuring…").foregroundStyle(.secondary) }
@@ -325,7 +327,7 @@ struct SyncViewerSheet: View {
                 }
             }
         }
-        .frame(width: 1240, height: standalone ? 1010 : 960)
+        .frame(width: DS.sheet(1240, standalone ? 1010 : 960).width, height: DS.sheet(1240, standalone ? 1010 : 960).height)
         .onAppear { if !standalone { model.reload(); model.findBeats() } }
     }
 
