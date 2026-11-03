@@ -134,10 +134,11 @@ final class SyncViewerModel: Identifiable {
     /// length of each window the engine measured (same formula as SyncEngine.measure)
     var measureWindow: Double { min(30, max(4, min(reference?.duration ?? 0, target?.duration ?? 0) / 8)) }
 
-    /// samples removed from the head of the track (negative = silence added), nudge preview included
+    /// samples removed from the head of the track (negative = the sound starts later), nudge preview included
     var cut: Int { (target?.trimStart ?? 0) + nudge }
-    /// what is really cut: E-AC-3 only on whole 1536-sample Dolby frames, rounded down (as JobRunner does)
-    func effective(_ c: Int) -> Int { isDolby ? max(0, c) / 1536 * 1536 : c }
+    /// what is really applied: E-AC-3 is cut only on whole 1536-sample Dolby frames, rounded down (as JobRunner does);
+    /// a delay (negative) is a start delay in the container, so it needs no rounding
+    func effective(_ c: Int) -> Int { isDolby && c > 0 ? c / 1536 * 1536 : c }
     var effectiveCut: Int { effective(cut) }
     var baseEffectiveCut: Int { effective(target?.trimStart ?? 0) }
     /// how late the reference is vs its own picture (s) — set in the Sync panel
@@ -221,10 +222,10 @@ final class SyncViewerModel: Identifiable {
 
     func moved() { userMoved = true; reload() }
 
-    /// ◀ (sound earlier) = cut more, ▶ (sound later) = cut less; Dolby can't get silence added at the head
+    /// ◀ (sound earlier) = cut more, ▶ (sound later) = cut less, then (below zero) a start delay: silence written at the
+    /// head for PCM, an edit-list delay in the container for Dolby — either way the sound itself is never touched
     func nudge(by samples: Int) {
         nudge += samples
-        if isDolby { nudge = max(nudge, -(target?.trimStart ?? 0)) }
         reload()
     }
 
@@ -373,6 +374,7 @@ struct SyncViewerSheet: View {
         let s = Double(abs(c)) / model.sampleRate
         let unit = model.isDolby ? String(format: " (%d Dolby frames of 32 ms)", abs(c) / 1536) : " (\(Fmt.int(abs(c))) samples)"
         if c > 0 { return String(format: "BROS-MUX removes %.3f s%@ from its head → its sound moves %.3f s EARLIER and lines up with the picture.", s, unit, s) }
+        if c < 0 && model.isDolby { return String(format: "BROS-MUX makes it start %.3f s later with a start delay in the container (edit list — no Dolby frame is touched) → its sound moves %.3f s LATER and lines up with the picture.", s, s) }
         if c < 0 { return String(format: "BROS-MUX adds %.3f s of silence%@ at its head → its sound moves %.3f s LATER and lines up with the picture.", s, unit, s) }
         return "Nothing to trim — the track already starts with the picture."
     }
@@ -380,7 +382,7 @@ struct SyncViewerSheet: View {
     func residualText(_ r: Double) -> String {
         if abs(r) < 0.05 { return "After the trim: exact sync (0.00 ms)." }
         var s = String(format: "After the trim: the sound is %.1f ms %@ (%.2f frame).", abs(r), r > 0 ? "late" : "early", abs(r) / 1000 * model.fps)
-        if model.isDolby { s += r > 0 ? " Dolby audio can only be cut on whole 32 ms frames, rounded so the sound is late, never early." : " Dolby audio can only be cut on whole 32 ms frames." }
+        if model.isDolby { s += r > 0 ? " Dolby audio can only be cut on whole 32 ms frames, rounded so the sound is late, never early." : " Dolby audio can only be cut on whole 32 ms frames; ▶ makes it start later (a start delay in the container)." }
         if r <= 45 && r >= -15 { s += " Well inside what viewers can notice (ITU-R BT.1359: 45 ms early / 125 ms late)." }
         return s
     }
@@ -414,8 +416,7 @@ struct SyncViewerSheet: View {
             Text("Nudge").foregroundStyle(.secondary)
             if model.isDolby {
                 Button("◀ 1 Dolby frame (32 ms)") { model.nudge(by: 1536) }.help("Sound earlier by one Dolby frame")
-                Button("1 Dolby frame (32 ms) ▶") { model.nudge(by: -1536) }.help("Sound later by one Dolby frame")
-                    .disabled(model.cut - 1536 < 0)
+                Button("1 Dolby frame (32 ms) ▶") { model.nudge(by: -1536) }.help("Sound later by one Dolby frame (below zero: a start delay in the container, no frame touched)")
             } else {
                 Button("◀ 1 frame") { model.nudge(by: model.frameSamples) }.help("Sound earlier by one video frame")
                 Button("◀ 1 ms") { model.nudge(by: Int(model.sampleRate / 1000)) }.help("Sound earlier by 1 ms")

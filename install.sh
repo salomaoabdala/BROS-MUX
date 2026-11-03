@@ -1,7 +1,7 @@
 #!/bin/zsh
 # BROS-MUX installer (Abdala Brothers)
 #
-# Installs everything the app needs on a Mac and the app itself:
+# Installs everything the app needs on a Mac with Apple Silicon (the app has no Intel build) and the app itself:
 #   1. Homebrew, if it is not there yet
 #   2. the engines: gpac (MP4Box), ffmpeg (+ ffprobe), media-info, dovi_tool, hdr10plus_tool
 #   3. the app: the prebuilt BROS-MUX-v*.zip next to this script (or in dist/), the GitHub release,
@@ -20,6 +20,7 @@ warn(){ print -P "%F{yellow}!%f $*" }
 
 if [ "$(uname)" != "Darwin" ]; then echo "BROS-MUX runs on macOS only."; exit 1; fi
 if [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 14 ]; then echo "macOS 14 (Sonoma) or newer is required."; exit 1; fi
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" != "1" ]; then echo "BROS-MUX is built for Apple Silicon only (M1 or newer); this Mac is Intel."; exit 1; fi
 
 # 1. Homebrew --------------------------------------------------------------------------------
 if ! command -v brew >/dev/null 2>&1; then

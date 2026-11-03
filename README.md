@@ -1,10 +1,13 @@
-# BROS-MUX (v.1.4)
+# BROS-MUX (v.1.5)
 
-Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App nativo de macOS (SwiftUI) que embrulha MP4Box, ffmpeg, ffprobe, MediaInfo, dovi_tool e hdr10plus_tool. Nada é recomprimido: cada faixa entra e sai bit a bit. Foi feito para entregar o filme **2DIE4** ao Academy Screening Room.
+Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App nativo de macOS (SwiftUI), só para Apple Silicon, que embrulha MP4Box, ffmpeg, ffprobe, MediaInfo, dovi_tool e hdr10plus_tool. Nada é recomprimido: cada faixa entra e sai bit a bit. Foi feito para entregar o filme **2DIE4** ao Academy Screening Room.
 
 ## O que ele faz
 
 - **Mux sem perda** de vídeo + áudios (PCM, Dolby Digital Plus JOC/Atmos, TrueHD) em MOV/MP4 com os átomos de canal e Dolby corretos para QuickTime, Resolve e a Academia; MKV sem perda para home theater.
+- **Apple Silicon** (v1.5): o app é compilado só para arm64 — não existe fatia Intel, de propósito, então o macOS nunca o executa via Rosetta (era isso que disparava o aviso "Support Ending for Intel-based Apps" do macOS 26). Requer um Mac com Apple Silicon (M1 ou mais novo).
+- **Zidoo** (v1.5): o File Checker e o resultado do mux dizem se o arquivo toca no Zidoo da sala de projeção (container, vídeo e áudio contra as especificações publicadas pela Zidoo), com selo e ressalva; no Mux o selo é previsto a partir das fontes antes de muxar, e o relatório em texto ganha a seção ZIDOO PLAYBACK.
+- **Dolby Digital Plus atrasado sem recodificar** (v1.5): uma faixa E-AC-3 que precisa começar mais tarde recebe um start delay no container (edit list — `delay=N/48000:moovts=-1` no MP4Box) em vez de silêncio recodificado; nenhum frame Dolby é tocado, e no Sync Viewer o ▶ pode empurrar o som para depois de zero.
 - **Channel order** (v1.2): ouve cada canal de uma faixa PCM e diz quem é L, R, C, LFE, Ls, Rs com porcentagem de confiança (o LFE não tem nada acima de 120 Hz, o par de frente é o par alto que anda junto, o centro carrega a fala, os surrounds são o que sobra); você corrige se quiser e escolhe a ordem de saída (SMPTE L R C LFE Ls Rs, Film L C R Ls Rs LFE, DTS, ou personalizada). No mux os samples são permutados dentro de cada bloco, sem recompressão, e a verificação bit a bit confere contra a fonte permutada. Esquerda/direita dentro de um par seguem a ordem do arquivo, porque o som não distingue.
 - **Tela de MacBook** (v1.4): o Picture Sync Check e o Sync Viewer cabem na tela (antes eram mais altos que a tela de um MacBook de 14" e o botão Done ficava escondido); na largura mínima da janela com o inspector aberto, os campos de cada faixa ficam em duas linhas em vez de cortados; com mais de 4 faixas de áudio, o seletor de faixa desses dois painéis vira um menu (segmentado, ele estourava o cabeçalho).
 - **Lista de faixas** (v1.3): rola sempre, inclusive enquanto os arquivos são lidos, durante o Align e durante o mux (só os controles das linhas ficam travados); cada arquivo aparece na lista assim que é lido; avisos e o resultado do mux rolam junto com a lista em vez de empurrá-la para fora da janela.
@@ -17,7 +20,7 @@ Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App 
 
 ## Instalar em outro Mac
 
-Requer macOS 14 (Sonoma) ou mais novo. O instalador cuida do resto (Homebrew, engines e o app):
+Requer um Mac com Apple Silicon (M1 ou mais novo) e macOS 14 (Sonoma) ou mais novo. O instalador cuida do resto (Homebrew, engines e o app):
 
 ```bash
 git clone https://github.com/salomaoabdala/BROS-MUX.git && cd BROS-MUX && ./install.sh
@@ -40,7 +43,7 @@ A tela inicial do app mostra cada engine com a versão instalada; o que faltar a
 ./build.sh
 ```
 
-Gera `build/BROS-MUX.app` universal (Apple Silicon + Intel) com `swiftc`, sem Xcode project. `FAST=1 ./build.sh` compila só para a arquitetura da máquina. A versão fica em `VERSION` no `build.sh` e em `AppInfo.version` no `Design.swift`.
+Gera `build/BROS-MUX.app` só para Apple Silicon (arm64, whole-module optimization) com `swiftc`, sem Xcode project — não há fatia Intel, de propósito, e o Info.plist declara `LSRequiresNativeExecution`, então o app nunca roda via Rosetta. A versão fica em `VERSION` no `build.sh` e em `AppInfo.version` no `Design.swift`.
 
 ## Linha de comando
 

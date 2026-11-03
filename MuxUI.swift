@@ -383,7 +383,7 @@ struct TrackRow: View {
             if track.canTrim {
                 TextField("0", value: $track.trimStartMs, format: .number.precision(.fractionLength(0...3)))
                     .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing)
-                    .help("How much to cut from the start to sync (negative adds silence — PCM only). Filled in by “Align”.")
+                    .help("How much to cut from the start to sync (negative makes it start later: silence written at the head for PCM, a start delay in the container for Dolby E-AC-3). Filled in by “Align”.")
             } else {
                 Text("—").foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .trailing)
             }
@@ -430,8 +430,11 @@ struct ResultBanner: View {
             banner(color: s == .ok ? .green : s == .warning ? .orange : .red,
                    icon: s == .ok ? "checkmark.circle.fill" : s == .warning ? "exclamationmark.triangle.fill" : "xmark.octagon.fill",
                    title: s == .ok ? "Done — \(url?.lastPathComponent ?? "")" : s == .warning ? "File created, with warnings" : "File created, but a check failed") {
-                if let insp = project.resultInspection, !project.hdr.encode, project.container != .mkv {
-                    AcademySeal(level: insp.level, caption: "Verified on the final file", compact: true).padding(.top, 6)
+                if let insp = project.resultInspection {
+                    if !project.hdr.encode, project.container != .mkv {
+                        AcademySeal(level: insp.level, caption: "Verified on the final file", compact: true).padding(.top, 6)
+                    }
+                    ZidooSeal(level: insp.zidooLevel, caption: "Read from the final file · " + Zidoo.caveat, compact: true).padding(.top, 6)
                 }
                 HStack(spacing: 8) {
                     if let url {
@@ -644,7 +647,7 @@ struct SyncPanel: View {
             Text("Sync")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Lines up the waveforms: slides each track's waveform against the reference's (cross-correlation) at 15 points spread evenly over the film and finds the exact offset, down to one sample. Trimming is lossless: sample exact for PCM, 32 ms Dolby frames for Atmos (the sound is never early). The reference itself is not muxed. The audio is lined up with audio; “Picture Check…” lines it up with the image (hard cuts vs sound hits), and the same check runs on the muxed file.")
+                Text("Lines up the waveforms: slides each track's waveform against the reference's (cross-correlation) at 15 points spread evenly over the film and finds the exact offset, down to one sample. Trimming is lossless: sample exact for PCM, 32 ms Dolby frames for Atmos (the sound is never early), and a track that has to start later gets silence at the head (PCM) or a start delay in the container (Atmos, no frame touched). The reference itself is not muxed. The audio is lined up with audio; “Picture Check…” lines it up with the image (hard cuts vs sound hits), and the same check runs on the muxed file.")
                 if !viewerTargets.isEmpty {
                     Text("* Tolerance: the sound may be at most 15 ms early or 45 ms late vs the picture (ATSC IS-191, the broadcast limit; viewers start to notice at about 45 ms early / 125 ms late, ITU-R BT.1359). Dolby audio is cut in whole 32 ms frames, so up to 32 ms late after the trim is normal and inside the tolerance.")
                 }
@@ -662,7 +665,7 @@ struct SyncLights: View {
 
     var body: some View {
         let sr = track.sampleRate > 0 ? track.sampleRate : 48000
-        let cut = track.codecKey == "eac3" ? max(0, track.trimStart) / 1536 * 1536 : track.trimStart
+        let cut = track.codecKey == "eac3" && track.trimStart > 0 ? track.trimStart / 1536 * 1536 : track.trimStart
         let before = track.syncLag.map { ($0 + project.referenceOffset) * 1000 }
         let after = track.syncLag.map { ($0 + project.referenceOffset - Double(cut) / sr) * 1000 }
         VStack(alignment: .leading, spacing: 3) {
@@ -670,7 +673,7 @@ struct SyncLights: View {
             HStack(spacing: 6) { light(before); Text(text(before, "as delivered")).font(.caption) }
             HStack(spacing: 6) { light(after); Text(text(after, "as muxed")).font(.caption) }
             if let a = after, !Self.ok(a) {
-                Text(a < Self.early ? "Early: a compressed track can't be delayed without re-encoding." : "Still late: nudge it in the Sync Viewer.")
+                Text(a < Self.early ? (track.isPCM || track.codecKey == "eac3" ? "Early: nudge it later in the Sync Viewer." : "Early: a compressed track can't be delayed without re-encoding.") : "Still late: nudge it in the Sync Viewer.")
                     .font(.caption).foregroundStyle(.red)
             }
         }
@@ -788,6 +791,19 @@ struct AcademySection: View {
             } header: {
                 Text("Academy specs")
             }
+        }
+        Section {
+            ZidooSeal(level: project.predictedZidooLevel, caption: "Predicted from the sources · " + Zidoo.caveat, compact: true)
+            let issues = project.predictedZidooChecks.filter { $0.level == .fail || $0.level == .warn }
+            ForEach(Array(issues.prefix(3).enumerated()), id: \.offset) { _, c in
+                Label {
+                    Text("\(c.title): \(c.detail)").font(.caption).fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: c.level.icon).foregroundStyle(c.level.color)
+                }
+            }
+        } header: {
+            Text("Zidoo (screening room)")
         }
     }
 }

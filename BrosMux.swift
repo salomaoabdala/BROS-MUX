@@ -345,7 +345,8 @@ struct Track: Identifiable {
     var channelReport: String? = nil
     /// The order the channels are written in (nil = as in the source). PCM from a WAV only: samples are permuted, never touched.
     var channelTarget: ChannelOrder? = nil
-    /// Sync offset in samples of this track: > 0 trims the head, < 0 adds silence (PCM only)
+    /// Sync offset in samples of this track: > 0 trims the head, < 0 delays it (PCM: silence written at the head;
+    /// E-AC-3: a start delay in the container's edit list — the Dolby frames are never touched)
     var trimStart = 0
     var syncNote: String?
     var syncLag: Double?                       // measured offset vs the reference (s); > 0 = this track is late
@@ -1548,6 +1549,8 @@ struct InspectionData {
     var checks: [Check] = []
     var level: AcademyLevel?
     var loudness: [String] = []
+    var zidooChecks: [Check] = []          // where it plays: the screening-room Zidoo (Zidoo.swift)
+    var zidooLevel: ZidooLevel?
 }
 
 enum Inspection {
@@ -1557,7 +1560,9 @@ enum Inspection {
         var checks = Academy.checks(fileName: u.lastPathComponent, t, black: black)
         let level = t.isEmpty ? nil : Academy.level(checks, t)
         if let qt = quickTimeCheck(u, t) { checks.append(qt) }     // compatibility note, not part of the Academy seal
-        return InspectionData(tracks: t, report: MediaInfo.text(u), checks: checks, level: level, loudness: [])
+        let zc = t.isEmpty ? [] : Zidoo.checks(t)
+        return InspectionData(tracks: t, report: MediaInfo.text(u), checks: checks, level: level, loudness: [],
+                              zidooChecks: zc, zidooLevel: t.isEmpty ? nil : Zidoo.level(zc))
     }
 
     /// Does Apple's own reader (AVFoundation — QuickTime Player, Final Cut, Compressor) see every track?
@@ -1652,6 +1657,10 @@ enum Inspection {
         if let l = d.level { s += "ACADEMY SPECS SEAL: \(l.emoji) \(l.title)\n\(l.explanation)\n(Based on the Academy Screening Room technical specifications — not an official Academy approval.)\n\n" }
         s += "ACADEMY SCREENING ROOM CHECKS\n"
         for c in d.checks { s += "[\(c.level.text)] \(c.title): \(c.detail)\n" }
+        if let z = d.zidooLevel {
+            s += "\nZIDOO PLAYBACK: \(z.emoji) \(z.title)\n\(z.explanation)\n(\(Zidoo.caveat))\n"
+            for c in d.zidooChecks { s += "[\(c.level.text)] \(c.title): \(c.detail)\n" }
+        }
         if !d.loudness.isEmpty {
             s += "\nLOUDNESS (read-only — the mix is never changed)\n"
             for l in d.loudness { s += "• \(l)\n" }
@@ -1665,7 +1674,7 @@ enum Inspection {
 
 /// How an audio track will be trimmed (in samples of the track)
 struct TrimPlan {
-    let pad: Int       // silence added at the head (PCM only)
+    let pad: Int       // samples the sound starts later: silence written at the head (PCM) or an edit-list delay (E-AC-3)
     let cut: Int       // samples cut from the head of the source
     let keep: Int      // samples kept from the source
     let total: Int
@@ -1745,7 +1754,7 @@ final class JobRunner {
         for t in spec.tracks where t.kind == .audio {
             if let p = spec.plans[t.id], !p.isIdentity {
                 if !t.canTrim { return "Sync trimming isn't supported for “\(t.title)” (\(t.codecName))" + (t.codecKey == "truehd" ? " — a TrueHD encode can't be cut without re-encoding, so it has to start exactly with the picture." : ".") }
-                if p.pad > 0 && !t.isPCM { return "“\(t.title)” is early and would need silence at the head — for \(t.codecName) that means re-encoding. Offset the other tracks instead." }
+                if p.pad > 0 && !t.isPCM && t.codecKey != "eac3" { return "“\(t.title)” is early and would need silence at the head — for \(t.codecName) that means re-encoding. Offset the other tracks instead." }
             }
         }
         if let e = spec.videoEncode {
@@ -2026,11 +2035,22 @@ final class JobRunner {
                 let sr = t.sampleRate > 0 ? t.sampleRate : 48000
                 let residual = Double(plan.cut - s.skippedSamples) / sr * 1000
                 let tailFrames = s.tailAUs
-                let note = "“\(t.title)”: cut \(s.skippedAUs) Dolby frames (\(String(format: "%.3f", Double(s.skippedSamples) / sr)) s) from the head and \(tailFrames) from the tail — frames copied byte for byte; " +
+                var note = "“\(t.title)”: cut \(s.skippedAUs) Dolby frames (\(String(format: "%.3f", Double(s.skippedSamples) / sr)) s) from the head and \(tailFrames) from the tail — frames copied byte for byte; " +
                     (abs(residual) < 0.01 ? "exact alignment" : String(format: "sound ends up %.1f ms late (Dolby frame boundary = 32 ms; imperceptible)", residual))
+                var options: [String] = []
+                if plan.pad > 0 {
+                    // the sound has to start later: a start delay in the container (an empty edit in the track's edit list) —
+                    // the frames themselves are never touched. Without moovts MP4Box quantises the delay to 1/600 s (up to
+                    // 1.7 ms early); moovts=-1 computes it in the audio's own clock: exact in MP4/MKV, and in MOV (where
+                    // QuickTime makes the movie run at the picture's clock, e.g. 2400/s) rounded to under half a millisecond
+                    options.append("delay=\(plan.pad)/\(Int(sr))")
+                    options.append("moovts=-1")
+                    note = "“\(t.title)”: starts \(String(format: "%.3f", Double(plan.pad) / sr)) s later by a start delay in the container (edit list, no frame touched)" +
+                        (tailFrames > 0 ? "; \(tailFrames) Dolby frames cut from the tail" : "") + " — frames copied byte for byte"
+                }
                 return Prepared(path: gpacTmp.appendingPathComponent(dst.lastPathComponent).path, selector: nil, rangeEnd: nil,
                                 verify: .eac3(t.url, t.streamIndex, skip: s.skippedAUs, keep: s.keptAUs), note: note,
-                                samplesPerFrame: s.samplesPerAU)
+                                samplesPerFrame: s.samplesPerAU, importOptions: options)
             }
             throw AppError("Sync trimming isn't supported for “\(t.title)”.")
         }
@@ -2595,7 +2615,10 @@ final class Project {
                              (lateMs >= 0.05 ? String(format: " → the sound stays %.1f ms late, never early)", lateMs) : ")"))
             } else { parts.append(String(format: "trims %.3f s from the head", Double(p.cut) / sr)) }
         }
-        if p.pad > 0 { parts.append(String(format: "adds %.3f s of silence at the head", Double(p.pad) / sr)) }
+        if p.pad > 0 {
+            parts.append(dolby ? String(format: "starts %.3f s later (a start delay in the container — no Dolby frame is touched)", Double(p.pad) / sr)
+                               : String(format: "adds %.3f s of silence at the head", Double(p.pad) / sr))
+        }
         if p.tail > 0 { parts.append(String(format: "trims %.3f s from the tail (ends with the video)", Double(p.tail) / sr)) }
         if videoTrack != nil, matchVideoEnd {
             let len = Double(p.pad + p.keep) / sr
@@ -2657,7 +2680,7 @@ final class Project {
                 continue
             }
             let samples = Int(((lag + offset) * Double(sr)).rounded())
-            if samples < 0 && !t.isPCM {
+            if samples < 0 && !t.isPCM && t.codecKey != "eac3" {   // E-AC-3 gets a start delay in the container instead
                 let msg = String(format: "the sound is %.1f ms EARLY vs the picture; %@ can't be delayed without re-encoding", -(lag + offset) * 1000, t.codecName)
                 out.append(AlignResult(id: t.id, samples: nil, note: "Not aligned: " + msg, line: "“\(t.title)”: not aligned — " + msg, lag: lag, points: r.points))
                 continue
@@ -2702,10 +2725,10 @@ final class Project {
                 }
                 if let p = spec.plans[t.id], t.sampleRate > 0 {
                     var samples = p.pad + p.keep
-                    if t.codecKey == "eac3" {   // frame rounding: head down, tail up
+                    if t.codecKey == "eac3" {   // frame rounding: head down, tail up (+ the start delay, if any)
                         let spf = 1536
                         let start = (p.cut / spf) * spf
-                        samples = Int((Double(p.cut + p.keep - start) / Double(spf)).rounded(.up)) * spf
+                        samples = p.pad + Int((Double(p.cut + p.keep - start) / Double(spf)).rounded(.up)) * spf
                     }
                     f["Duration"] = String(Double(samples) / t.sampleRate)
                 }
@@ -2723,6 +2746,11 @@ final class Project {
         guard let out = outputURL, !included.isEmpty else { return [] }
         return Academy.checks(fileName: out.lastPathComponent, predictedOutput, black: nil, predicted: true)
     }
+    var predictedZidooChecks: [Check] {
+        let p = predictedOutput
+        return p.isEmpty ? [] : Zidoo.checks(p)
+    }
+    var predictedZidooLevel: ZidooLevel? { predictedOutput.isEmpty ? nil : Zidoo.level(predictedZidooChecks) }
     var predictedLevel: AcademyLevel? {
         let p = predictedOutput
         guard !p.isEmpty else { return nil }

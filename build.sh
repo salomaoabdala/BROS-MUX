@@ -1,27 +1,26 @@
 #!/bin/zsh
-# Compila o BROS-MUX.app (Abdala Brothers) e instala em /Applications
+# Compila o BROS-MUX.app (Abdala Brothers) — só para Apple Silicon.
+#
+# The app is built for arm64 and nothing else. There is no Intel (x86_64) slice on purpose: every Mac at Abdala
+# Brothers is Apple Silicon, and an app with no Intel code can never be run through Rosetta — which is what made
+# macOS 26 show "Support Ending for Intel-based Apps" for the old universal build. Info.plist also declares
+# LSRequiresNativeExecution, so Launch Services refuses to translate the app even if "Open using Rosetta" is ticked.
 set -e
 cd "$(dirname "$0")"
-VERSION=1.4                      # keep in step with AppInfo.version in Design.swift
+VERSION=1.5                      # keep in step with AppInfo.version in Design.swift
 NAME="BROS-MUX (v.$VERSION)"
 APP=build/BROS-MUX.app
+ARCH=arm64
+MACOS_MIN=14.0
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-# Universal binary (Apple Silicon + Intel) so the same app runs on every Mac; FAST=1 builds only this machine's slice.
-if [ -n "$FAST" ]; then ARCHS=($(uname -m)); else ARCHS=(arm64 x86_64); fi
-SLICES=()
-for arch in $ARCHS; do
-  echo "compiling $arch…"
-  if swiftc -O -parse-as-library -swift-version 5 -target $arch-apple-macos14.0 *.swift -o "build/BROS-MUX-$arch"; then
-    SLICES+=("build/BROS-MUX-$arch")
-  else
-    echo "WARNING: the $arch slice did not compile; the app will not run on $arch Macs"
-  fi
-done
-[ ${#SLICES[@]} -gt 0 ] || { echo "no slice compiled"; exit 1; }
-lipo -create $SLICES -output "$APP/Contents/MacOS/BROS-MUX"
-rm -f $SLICES
+# Whole-module optimization is what Xcode uses for Release builds: the app is compiled as one unit, so generics and
+# small functions are specialised and inlined across files; -num-threads keeps the code generation parallel.
+echo "compiling for $ARCH (Apple Silicon), optimized, whole module…"
+swiftc -O -wmo -num-threads "$(sysctl -n hw.ncpu)" -parse-as-library -swift-version 5 \
+  -target "$ARCH-apple-macos$MACOS_MIN" *.swift -o "$APP/Contents/MacOS/BROS-MUX"
+# set -e: a compile error stops the build right here — nothing else is ever shipped in place of the arm64 binary.
 
 [ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/"
 
@@ -38,7 +37,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>BROS-MUX</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSMinimumSystemVersion</key><string>$MACOS_MIN</string>
+  <key>LSArchitecturePriority</key>
+  <array><string>$ARCH</string></array>
+  <key>LSRequiresNativeExecution</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.video</string>
   <key>NSHumanReadableCopyright</key><string>Abdala Brothers</string>
@@ -56,4 +58,4 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 codesign --force --deep -s - "$APP"
-echo "OK: $APP"
+echo "OK: $APP — $(lipo -archs "$APP/Contents/MacOS/BROS-MUX") only, $(du -h "$APP/Contents/MacOS/BROS-MUX" | cut -f1)"

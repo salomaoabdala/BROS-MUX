@@ -15,7 +15,7 @@ struct InspectorView: View {
     var body: some View {
         if insp.url == nil {
             EmptyDropView(targeted: targeted, title: "Drop a file to inspect",
-                          subtitle: "Shows codec, quality, bitrate, Atmos, channel labels, black at head/tail, and checks everything against the Academy Screening Room specs. Read-only — nothing is changed.")
+                          subtitle: "Shows codec, quality, bitrate, Atmos, channel labels, black at head/tail, checks everything against the Academy Screening Room specs, and says whether it plays on the Zidoo. Read-only — nothing is changed.")
         } else if insp.loading {
             ProgressView("Reading the file…").frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -24,6 +24,7 @@ struct InspectorView: View {
                 verdict
                 summary
                 academy
+                ChecksSection(title: "Zidoo playback checks", checks: insp.data.zidooChecks, footer: Zidoo.caveat)
                 ForEach(Array(insp.data.tracks.enumerated()), id: \.offset) { _, t in TrackCard(t: t) }
                 loudness
                 Section {
@@ -74,6 +75,8 @@ struct InspectorView: View {
                 AcademySeal(level: insp.data.level, caption: "Verified on this file · based on the Academy Screening Room technical specs (not an official Academy approval)")
                     .padding(.vertical, 4)
             }
+            ZidooSeal(level: insp.data.zidooLevel, caption: "Read from this file · " + Zidoo.caveat)
+                .padding(.vertical, 4)
         }
     }
 
