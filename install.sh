@@ -43,11 +43,11 @@ done
 # 3. The app ---------------------------------------------------------------------------------
 APP=/Applications/BROS-MUX.app
 STAGE=$(mktemp -d)
-ZIP=$(ls BROS-MUX-v*.zip dist/BROS-MUX-v*.zip 2>/dev/null | head -1)
+zips=(BROS-MUX-v*.zip dist/BROS-MUX-v*.zip); ZIP=${zips[1]}
 if [ "$1" != "--build" ] && [ -z "$ZIP" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   say "Downloading the latest release from GitHub"
   mkdir -p dist && gh release download --pattern 'BROS-MUX-v*.zip' --dir dist --clobber 2>/dev/null || true
-  ZIP=$(ls dist/BROS-MUX-v*.zip 2>/dev/null | head -1)
+  zips=(dist/BROS-MUX-v*.zip); ZIP=${zips[1]}
 fi
 
 if [ "$1" != "--build" ] && [ -n "$ZIP" ]; then
