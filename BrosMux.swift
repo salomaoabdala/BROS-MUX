@@ -2405,15 +2405,18 @@ final class Project {
         loadingCount += 1
         notices.removeAll()
         if case .done = state { state = .idle }
-        // read in the order the files were given (predictable result)
+        // read in the order the files were given (predictable result); each file shows up in the list as soon as it
+        // has been read, so a long batch is not one long wait in front of an empty list
         DispatchQueue.global(qos: .userInitiated).async {
-            let results = files.map { Probe.tracks(for: $0) }
-            DispatchQueue.main.async {
-                self.loadingCount -= 1
-                for r in results {
+            for f in files {
+                let r = Probe.tracks(for: f)
+                DispatchQueue.main.async {
                     if let e = r.error { self.notices.append(e) }
                     self.insert(r.tracks)
                 }
+            }
+            DispatchQueue.main.async {
+                self.loadingCount -= 1
                 self.chooseDefaultReference()
             }
         }

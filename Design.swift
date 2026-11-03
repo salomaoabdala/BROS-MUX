@@ -8,7 +8,7 @@ import AppKit
 /// Name and version shown in the window title, the welcome screen, the reports and the Finder (build.sh writes the same
 /// version into Info.plist — keep the two in step).
 enum AppInfo {
-    static let version = "1.2"
+    static let version = "1.3"
     static let name = "BROS-MUX (v.\(version))"
 }
 
@@ -101,19 +101,30 @@ struct Chip: View {
     }
 }
 
-/// Monospaced read-only text (logs, commands, reports) on the text background
+/// Monospaced read-only text (logs, commands, reports) on the text background.
+/// On a page that scrolls itself (a Form, the inspector) pass `scrolls: false`: the box then grows and wraps with its
+/// text, because a scroll view nested in a scrolling page swallows the wheel whenever the cursor is over it.
 struct TerminalBox: View {
     let text: String
+    var scrolls = true
     var body: some View {
-        ScrollView([.vertical, .horizontal]) {
-            Text(text.isEmpty ? " " : text)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
+        Group {
+            if scrolls {
+                ScrollView([.vertical, .horizontal]) { content }
+            } else {
+                content.fixedSize(horizontal: false, vertical: true)
+            }
         }
         .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DS.groupStroke, lineWidth: 1))
+    }
+
+    var content: some View {
+        Text(text.isEmpty ? " " : text)
+            .font(.system(.caption, design: .monospaced))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
     }
 }
 

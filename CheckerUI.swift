@@ -28,7 +28,7 @@ struct InspectorView: View {
                 loudness
                 Section {
                     DisclosureGroup(isExpanded: Binding(get: { showRaw && !forceRawCollapsed }, set: { showRaw = $0 })) {
-                        TerminalBox(text: insp.data.report).frame(minHeight: 320)
+                        TerminalBox(text: insp.data.report, scrolls: false)
                         HStack {
                             Button("Copy Report") {
                                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(insp.data.report, forType: .string)

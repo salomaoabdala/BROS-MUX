@@ -1,4 +1,4 @@
-# BROS-MUX (v.1.2)
+# BROS-MUX (v.1.3)
 
 Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App nativo de macOS (SwiftUI) que embrulha MP4Box, ffmpeg, ffprobe, MediaInfo, dovi_tool e hdr10plus_tool. Nada é recomprimido: cada faixa entra e sai bit a bit. Foi feito para entregar o filme **2DIE4** ao Academy Screening Room.
 
@@ -6,6 +6,7 @@ Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App 
 
 - **Mux sem perda** de vídeo + áudios (PCM, Dolby Digital Plus JOC/Atmos, TrueHD) em MOV/MP4 com os átomos de canal e Dolby corretos para QuickTime, Resolve e a Academia; MKV sem perda para home theater.
 - **Channel order** (v1.2): ouve cada canal de uma faixa PCM e diz quem é L, R, C, LFE, Ls, Rs com porcentagem de confiança (o LFE não tem nada acima de 120 Hz, o par de frente é o par alto que anda junto, o centro carrega a fala, os surrounds são o que sobra); você corrige se quiser e escolhe a ordem de saída (SMPTE L R C LFE Ls Rs, Film L C R Ls Rs LFE, DTS, ou personalizada). No mux os samples são permutados dentro de cada bloco, sem recompressão, e a verificação bit a bit confere contra a fonte permutada. Esquerda/direita dentro de um par seguem a ordem do arquivo, porque o som não distingue.
+- **Lista de faixas** (v1.3): rola sempre, inclusive enquanto os arquivos são lidos, durante o Align e durante o mux (só os controles das linhas ficam travados); cada arquivo aparece na lista assim que é lido; avisos e o resultado do mux rolam junto com a lista em vez de empurrá-la para fora da janela.
 - **Sync**: correlação cruzada das formas de onda em 15 pontos do filme (exata ao sample), semáforo verde/vermelho com tolerância ATSC (−15/+45 ms), cortes só de samples inteiros na cabeça e na cauda.
 - **Picture Sync Check**: cortes de imagem contra mudanças de som, com loop de áudio e filmstrip, nas janelas entre 5% e 80% do filme.
 - **Render QC**: frames verdes/magenta/pretos/brancos, cartão "Media Offline" (OCR), frames repetidos, linhas e faixas de um frame, blocos chapados, saltos de timestamp, dropouts/cliques/clipping de áudio, canais mudos, duração A/V.

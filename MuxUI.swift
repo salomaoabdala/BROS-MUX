@@ -144,23 +144,14 @@ struct MuxContent: View {
     }
 
     var body: some View {
-        let notices = !Tools.missing.isEmpty || !project.notices.isEmpty || hasResult
         VStack(spacing: 0) {
-            if notices {
-                VStack(spacing: DS.rowGap) {
-                    if !Tools.missing.isEmpty {
-                        NoticeRow(text: "Missing tools (\(Tools.missing.joined(separator: ", "))). Run: brew install gpac media-info", level: .fail)
-                    }
-                    ForEach(Array(project.notices.enumerated()), id: \.offset) { _, n in NoticeRow(text: n, level: .warn) }
-                    ResultBanner()
-                }
-                .padding(.horizontal, DS.margin).padding(.top, DS.gap)
-            }
             if project.tracks.isEmpty && project.loadingCount == 0 {
+                NoticeStack(hasResult: hasResult)
+                    .padding(.horizontal, DS.margin).padding(.top, DS.gap)
                 EmptyDropView(targeted: targeted, title: "Drop your files here",
                               subtitle: "ProRes or H.264 video · IMF packages (HDR, Dolby Vision) · WAV/PCM audio · Dolby Atmos E-AC-3 JOC or TrueHD · SRT/VTT subtitles")
             } else {
-                TrackListView()
+                TrackListView(hasResult: hasResult)
                     .overlay {
                         if targeted {
                             RoundedRectangle(cornerRadius: DS.radius, style: .continuous)
@@ -172,6 +163,24 @@ struct MuxContent: View {
             }
         }
         .animation(.snappy(duration: 0.25), value: hasResult)
+    }
+}
+
+/// Missing tools, what went wrong with the files, and the result of the last mux. Nothing at all when there is nothing to say.
+struct NoticeStack: View {
+    @Environment(Project.self) private var project
+    let hasResult: Bool
+
+    var body: some View {
+        if !Tools.missing.isEmpty || !project.notices.isEmpty || hasResult {
+            VStack(spacing: DS.rowGap) {
+                if !Tools.missing.isEmpty {
+                    NoticeRow(text: "Missing tools (\(Tools.missing.joined(separator: ", "))). Run: brew install gpac media-info", level: .fail)
+                }
+                ForEach(Array(project.notices.enumerated()), id: \.offset) { _, n in NoticeRow(text: n, level: .warn) }
+                ResultBanner()
+            }
+        }
     }
 }
 
@@ -204,6 +213,7 @@ struct EmptyDropView: View {
 
 struct TrackListView: View {
     @Environment(Project.self) private var project
+    let hasResult: Bool
 
     var body: some View {
         @Bindable var project = project
@@ -225,18 +235,32 @@ struct TrackListView: View {
                 }
             }
             .padding(.horizontal, DS.margin).padding(.vertical, 10)
-            List {
-                ForEach($project.tracks) { $t in
-                    TrackRow(track: $t)
-                }
-                .onMove { project.tracks.move(fromOffsets: $0, toOffset: $1) }
-                if project.loadingCount > 0 {
-                    HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Reading files…").foregroundStyle(.secondary) }
-                        .padding(.vertical, 6)
+            // One scrolling area for everything: the notices used to sit above the list and, with many files, left it
+            // no height at all. The list itself is never disabled — a disabled list does not scroll on the Mac — so
+            // while files are read or the mux runs only the rows' controls are off (see TrackRow).
+            GeometryReader { geo in
+                ScrollViewReader { proxy in
+                    List {
+                        NoticeStack(hasResult: hasResult)
+                            .id("notices")
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: DS.margin, bottom: DS.rowGap, trailing: DS.margin))
+                        ForEach($project.tracks) { $t in
+                            TrackRow(track: $t, compact: geo.size.width < 990)
+                        }
+                        .onMove { project.tracks.move(fromOffsets: $0, toOffset: $1) }
+                        .moveDisabled(project.busy)
+                        if project.loadingCount > 0 {
+                            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Reading files…").foregroundStyle(.secondary) }
+                                .padding(.vertical, 6)
+                        }
+                    }
+                    .listStyle(.inset)
+                    .onChange(of: hasResult) { _, now in
+                        if now { withAnimation { proxy.scrollTo("notices", anchor: .top) } }
+                    }
                 }
             }
-            .listStyle(.inset)
-            .disabled(project.busy)
         }
     }
 }
@@ -244,28 +268,32 @@ struct TrackListView: View {
 struct TrackRow: View {
     @Environment(Project.self) private var project
     @Binding var track: Track
+    /// Narrow list: the fields go under the description. Decided once per list width, not measured per row.
+    var compact = false
 
     var isReference: Bool { project.syncReferenceID == track.id }
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            // wide window: the fields on the right
-            HStack(alignment: .top, spacing: 12) {
-                leading
-                info.frame(minWidth: 280, alignment: .leading)
-                Spacer(minLength: 24)
-                fields.fixedSize()
-                remove
-            }
-            // narrow window: the fields under the description
-            HStack(alignment: .top, spacing: 12) {
-                leading
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top) { info; Spacer(minLength: 8); remove }
-                    fields
+        Group {
+            if compact {
+                HStack(alignment: .top, spacing: 12) {
+                    leading
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top) { info; Spacer(minLength: 8); remove }
+                        fields
+                    }
+                }
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    leading
+                    info.frame(minWidth: 280, alignment: .leading)
+                    Spacer(minLength: 24)
+                    fields.fixedSize()
+                    remove
                 }
             }
         }
+        .disabled(project.busy)
         .padding(.vertical, 8)
         .opacity(track.include ? 1 : 0.55)
         .listRowSeparator(.visible)
@@ -700,7 +728,7 @@ struct OutputSection: View {
                 RunMonitorView(progress: project.progress, stage: project.stage, folder: project.outputFolder)
             }
             DisclosureGroup(isExpanded: $showCommand) {
-                TerminalBox(text: project.commandPreview.isEmpty ? "—" : project.commandPreview).frame(height: 110)
+                TerminalBox(text: project.commandPreview.isEmpty ? "—" : project.commandPreview, scrolls: false)
             } label: {
                 Text(project.hdr.encode ? "Commands (for reference)" : "MP4Box command (for reference)").foregroundStyle(.secondary)
             }
