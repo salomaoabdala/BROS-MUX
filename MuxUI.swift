@@ -768,7 +768,7 @@ struct SummarySections: View {
             LabeledContent("Audio tracks") { Text("\(audiosOut.count)") }
             ForEach(Array(audiosOut.enumerated()), id: \.offset) { i, a in
                 KeyValueRow(label: "Audio \(i + 1)", value: audioLine(a) + outAudioExtra(a),
-                            chip: project.planText(for: a) != nil ? "Identical + trimmed" : "Identical (bit-exact)", chipTint: .green)
+                            chip: (project.planText(for: a) != nil ? "Identical + trimmed" : "Identical (bit-exact)") + (a.channelPermutation != nil ? " + reordered" : ""), chipTint: .green)
             }
         } header: {
             Text("Output · \(project.container.rawValue.uppercased()) · ~\(Fmt.bytes(project.estimatedSize))")
@@ -795,7 +795,7 @@ struct SummarySections: View {
     }
     func outAudioExtra(_ a: Track) -> String {
         guard a.isPCM else { return "" }
-        if project.writeChannelMap && project.container == .mov, let tag = a.channelMap.tag(channels: a.channels, layout: a.channelLayout) {
+        if project.container == .mov, let tag = a.outputLayoutTag(writeLabels: project.writeChannelMap) {
             return " · " + ChannelMap.layoutName(tag)
         }
         return " · no channel labels"
@@ -861,7 +861,9 @@ struct QualitySheet: View {
                                 Text(t.bitDepth > 0 ? "\(t.bitDepth)-bit" : "—")
                                 Text(t.channels > 0 ? "\(t.channels)" : "—")
                                 if project.planText(for: t) != nil {
-                                    Label { Text("1:1 copy + trim") } icon: { Image(systemName: "scissors").foregroundStyle(Color.accentColor) }
+                                    Label { Text(t.channelPermutation != nil ? "1:1 copy + trim + reorder" : "1:1 copy + trim") } icon: { Image(systemName: "scissors").foregroundStyle(Color.accentColor) }
+                                } else if t.channelPermutation != nil {
+                                    Label { Text("1:1 copy + reorder") } icon: { Image(systemName: "arrow.left.arrow.right").foregroundStyle(Color.accentColor) }
                                 } else {
                                     Label { Text("1:1 copy") } icon: { Image(systemName: "equal.circle.fill").foregroundStyle(.green) }
                                 }
@@ -885,6 +887,7 @@ struct QualitySheet: View {
                             }
                             .disabled(!project.writeChannelMap)
                         }
+                        if t.include && t.canReorder { ChannelOrderRow(track: $t) }
                     }
                     Toggle(isOn: $project.fixColorTag) {
                         VStack(alignment: .leading, spacing: 2) {

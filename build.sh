@@ -2,7 +2,7 @@
 # Compila o BROS-MUX.app (Abdala Brothers) e instala em /Applications
 set -e
 cd "$(dirname "$0")"
-VERSION=1.1                      # keep in step with AppInfo.version in Design.swift
+VERSION=1.2                      # keep in step with AppInfo.version in Design.swift
 NAME="BROS-MUX (v.$VERSION)"
 APP=build/BROS-MUX.app
 rm -rf build

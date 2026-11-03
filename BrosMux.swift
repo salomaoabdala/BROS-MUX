@@ -303,12 +303,12 @@ enum ChannelMap: String, CaseIterable, Identifiable {
             return nil
         case .s51: return channels == 6 ? 0x0079_0006 : nil      // MPEG_5_1_A
         case .stereo: return channels == 2 ? 0x0065_0002 : nil   // Stereo
-        case .s71: return channels == 8 ? 0x0082_0008 : nil      // MPEG_7_1_C
+        case .s71: return channels == 8 ? 0x0080_0008 : nil      // MPEG_7_1_C (L R C LFE Ls Rs Rls Rrs)
         case .none: return nil
         }
     }
     static func layoutName(_ tag: UInt32) -> String {
-        switch tag { case 0x0079_0006: return "L R C LFE Ls Rs"; case 0x0065_0002: return "L R"; case 0x0082_0008: return "L R C LFE Ls Rs Lrs Rrs"; default: return String(tag, radix: 16) }
+        ChannelOrder.layoutName(tag) ?? String(tag, radix: 16)
     }
 }
 
@@ -339,6 +339,12 @@ struct Track: Identifiable {
     var title: String
     var enabled = true
     var channelMap: ChannelMap = .auto
+    /// Channel identification (ChannelID): the role of each source channel, in file order, and how sure the engine was
+    var channelRoles: [ChannelRole]? = nil
+    var channelConfidence: Double? = nil
+    var channelReport: String? = nil
+    /// The order the channels are written in (nil = as in the source). PCM from a WAV only: samples are permuted, never touched.
+    var channelTarget: ChannelOrder? = nil
     /// Sync offset in samples of this track: > 0 trims the head, < 0 adds silence (PCM only)
     var trimStart = 0
     var syncNote: String?
@@ -348,6 +354,20 @@ struct Track: Identifiable {
     var imfSegments: [IMFResource] = []        // picture of an IMF package: the stretches of MXF the CPL uses
 
     var isPCM: Bool { codecKey.hasPrefix("pcm_") }
+    var canReorder: Bool { kind == .audio && isPCM && wav != nil && channels >= 2 }
+    var sourceOrder: ChannelOrder? { channelRoles.map { ChannelOrder(roles: $0) } }
+    /// Output channel k takes source channel permutation[k]; nil when nothing changes
+    var channelPermutation: [Int]? {
+        guard canReorder, let target = channelTarget, let src = sourceOrder, target.count == channels else { return nil }
+        return target.permutation(from: src)
+    }
+    /// The layout tag to label the output with: the chosen order when the channels are reordered, else the picker's choice
+    func outputLayoutTag(writeLabels: Bool) -> UInt32? {
+        guard writeLabels, isPCM else { return nil }
+        if channelPermutation != nil { return channelTarget?.layoutTag }           // permuted data: only the written order may label it
+        if channelMap == .auto, let src = sourceOrder, src.isComplete, src.count == channels { return src.layoutTag }   // roles heard or set by hand beat the declared mask
+        return channelMap.tag(channels: channels, layout: channelLayout)
+    }
     var blockAlign: Int { wav?.blockAlign ?? max(1, channels * max(bitDepth, 8) / 8) }
     var totalSamples: Int {
         if let wav { return wav.dataSize / max(1, wav.blockAlign) }
@@ -724,10 +744,12 @@ struct WavInfo {
     }
 
     /// Writes a new WAV: ['pad' samples of silence] + samples [cut, cut+keep) copied byte for byte from the source.
-    static func writeTrimmed(_ info: WavInfo, from src: URL, to dst: URL, pad: Int, cut: Int, keep: Int,
+    /// `order`: output channel k takes source channel order[k] (a permutation); the samples themselves are copied as they are
+    static func writeTrimmed(_ info: WavInfo, from src: URL, to dst: URL, pad: Int, cut: Int, keep: Int, order: [Int]? = nil,
                              cancel: CancelFlag, progress: (Double) -> Void) throws {
         let ba = info.blockAlign
         guard pad >= 0, cut >= 0, keep > 0, (cut + keep) * ba <= info.dataSize else { throw AppError("Trim is outside the source audio.") }
+        let map = try order.map { try byteMap($0, blockAlign: ba) }
         let dataBytes = (pad + keep) * ba
         let fmtChunk = 8 + info.fmt.count + (info.fmt.count & 1)
         let total = 12 + fmtChunk + 8 + dataBytes + (dataBytes & 1)
@@ -750,7 +772,7 @@ struct WavInfo {
         let input = try FileHandle(forReadingFrom: src)
         defer { try? input.close() }
         try out.write(contentsOf: h)
-        let chunk = 16 << 20
+        let chunk = max(ba, (16 << 20) / ba * ba)          // whole blocks, so a channel permutation never splits a sample
         var padLeft = pad * ba
         while padLeft > 0 {
             let n = min(chunk, padLeft)
@@ -763,11 +785,34 @@ struct WavInfo {
             if cancel.isSet { throw Cancelled() }
             let d = input.readData(ofLength: min(chunk, left))
             guard !d.isEmpty else { throw AppError("The source WAV ended earlier than expected.") }
-            try out.write(contentsOf: d)
+            try out.write(contentsOf: map.map { reorder(d, blockAlign: ba, map: $0) } ?? d)
             left -= d.count; done += d.count
             progress(Double(done) / Double(keep * ba))
         }
         if dataBytes & 1 == 1 { try out.write(contentsOf: Data([0])) }
+    }
+
+    /// For a channel permutation, where each byte of an output block comes from in the source block
+    static func byteMap(_ order: [Int], blockAlign ba: Int) throws -> [Int] {
+        let ch = order.count
+        guard ch > 0, ba % ch == 0, Set(order) == Set(0..<ch) else { throw AppError("The channel order doesn't match the track (\(ch) channels, block of \(ba) bytes).") }
+        let bps = ba / ch
+        return (0..<ba).map { j in order[j / bps] * bps + j % bps }
+    }
+
+    /// Permutes the channels of whole blocks; bytes inside each sample are untouched
+    static func reorder(_ d: Data, blockAlign ba: Int, map: [Int]) -> Data {
+        let n = d.count / ba * ba
+        var out = Data(count: n)
+        out.withUnsafeMutableBytes { o in d.withUnsafeBytes { i in
+            guard let ip = i.bindMemory(to: UInt8.self).baseAddress, let op = o.bindMemory(to: UInt8.self).baseAddress else { return }
+            var b = 0
+            while b < n {
+                for j in 0..<ba { op[b + j] = ip[b + map[j]] }
+                b += ba
+            }
+        } }
+        return out
     }
 }
 
@@ -1172,19 +1217,21 @@ final class PipeSource: ByteSource {
 }
 
 final class WavRangeSource: ByteSource {
-    let fh: FileHandle; var padLeft: Int; var left: Int; let silence: UInt8
-    init(_ url: URL, info: WavInfo, pad: Int, cut: Int, keep: Int) throws {
+    let fh: FileHandle; var padLeft: Int; var left: Int; let silence: UInt8; let ba: Int; let map: [Int]?
+    init(_ url: URL, info: WavInfo, pad: Int, cut: Int, keep: Int, order: [Int]? = nil) throws {
         fh = try FileHandle(forReadingFrom: url)
         try fh.seek(toOffset: UInt64(info.dataStart + cut * info.blockAlign))
         padLeft = pad * info.blockAlign; left = keep * info.blockAlign; silence = info.silenceByte
+        ba = info.blockAlign; map = try order.map { try WavInfo.byteMap($0, blockAlign: info.blockAlign) }
     }
     func read(_ max: Int) throws -> Data {
         if padLeft > 0 { let n = min(max, padLeft); padLeft -= n; return Data(repeating: silence, count: n) }
         guard left > 0 else { return Data() }
-        let d = fh.readData(ofLength: min(max, left))
+        let want = map == nil ? min(max, left) : Swift.max(ba, min(max, left) / ba * ba)
+        let d = fh.readData(ofLength: want)
         guard !d.isEmpty else { throw AppError("the source WAV ended earlier than expected") }
         left -= d.count
-        return d
+        return map.map { WavInfo.reorder(d, blockAlign: ba, map: $0) } ?? d
     }
     func finish() throws { try? fh.close() }
 }
@@ -1210,7 +1257,7 @@ final class EAC3SliceSource: ByteSource {
 
 enum VerifySource {
     case ffmpeg(URL, Int)                                   // whole source track via ffmpeg
-    case wav(URL, WavInfo, pad: Int, cut: Int, keep: Int)   // bytes read straight from the WAV
+    case wav(URL, WavInfo, pad: Int, cut: Int, keep: Int, order: [Int]? = nil)   // bytes read straight from the WAV (channels permuted the same way)
     case eac3(URL, Int, skip: Int, keep: Int)              // source frames, with the same trim
     case none
 }
@@ -1258,8 +1305,8 @@ enum Verifier {
             case .ffmpeg(let url, let idx):
                 guard let sf = rawFormat(t.codecKey) else { return Result(ok: true, text: "\(name): check not available for \(t.codecKey)") }
                 src = try PipeSource(["-i", url.path, "-map", "0:\(idx)", "-c", "copy", "-f", sf, "-"])
-            case .wav(let url, let info, let pad, let cut, let keep):
-                src = try WavRangeSource(url, info: info, pad: pad, cut: cut, keep: keep)
+            case .wav(let url, let info, let pad, let cut, let keep, let order):
+                src = try WavRangeSource(url, info: info, pad: pad, cut: cut, keep: keep, order: order)
             case .eac3(let url, let idx, let skip, let keep):
                 src = try EAC3SliceSource(url, index: idx, skip: skip, keep: keep)
             case .none:
@@ -1714,7 +1761,7 @@ final class JobRunner {
         // space: MP4Box writes a temporary file as big as the output before interleaving (+ the encoded picture, + the MKV copy)
         let outBytes = spec.tracks.reduce(0.0) { $0 + estimatedBytes($1, plan: spec.plans[$1.id], encode: spec.videoEncode) }
         let tempBytes = spec.tracks.reduce(0.0) { sum, t in
-            guard let p = spec.plans[t.id], !p.isIdentity else { return sum }
+            guard let p = spec.plans[t.id], !p.isIdentity || t.channelPermutation != nil else { return sum }   // a reorder-only track gets a full temp copy too
             return sum + estimatedBytes(t, plan: p)
         }
         let need = outBytes * 2 + tempBytes + (spec.videoEncode?.estimatedBytes ?? 0) * 2 + (spec.isMKV ? outBytes : 0) + 1_000_000_000
@@ -1815,8 +1862,10 @@ final class JobRunner {
                 let t = spec.tracks[i]
                 var f = MoovPatcher.AudioFix(channels: t.channels, sampleRate: t.sampleRate > 0 ? t.sampleRate : 48000)
                 if spec.writeChannelMap && t.isPCM {
-                    if let tag = t.channelMap.tag(channels: t.channels, layout: t.channelLayout) { f.chanTag = tag }
-                    else if t.channelMap != .none {
+                    if let tag = t.outputLayoutTag(writeLabels: true) { f.chanTag = tag }
+                    else if t.channelPermutation != nil, let target = t.channelTarget {
+                        lines.append("“\(t.title)”: no QuickTime layout tag describes \(target.text) — channel labels not written")
+                    } else if t.channelMap != .none {
                         lines.append("⚠ “\(t.title)”: the source doesn't declare a 5.1/stereo layout — pick the channel map in Quality & Advanced"); warn = true
                     }
                 }
@@ -1949,19 +1998,24 @@ final class JobRunner {
             return Prepared(path: gpacTmp.appendingPathComponent(r.hevc.lastPathComponent).path, selector: nil, rangeEnd: nil,
                             verify: .none, note: r.notes.joined(separator: "\n"), importOptions: e.importOptions(mov: spec.isMOV))
         }
-        if t.kind == .audio, let plan = spec.plans[t.id], !plan.isIdentity {
+        if t.kind == .audio, let plan = spec.plans[t.id], !plan.isIdentity || t.channelPermutation != nil {
             if t.isPCM, let wav = t.wav {
                 let dst = tmp.appendingPathComponent("audio\(index).wav")
-                try WavInfo.writeTrimmed(wav, from: t.url, to: dst, pad: plan.pad, cut: plan.cut, keep: plan.keep, cancel: cancel) { p in
-                    self.onStage("Trimming “\(t.title)” (PCM, sample exact)…", p)
+                let order = t.channelPermutation
+                let what = order == nil ? "Trimming" : plan.isIdentity ? "Reordering the channels of" : "Trimming and reordering"
+                try WavInfo.writeTrimmed(wav, from: t.url, to: dst, pad: plan.pad, cut: plan.cut, keep: plan.keep, order: order, cancel: cancel) { p in
+                    self.onStage("\(what) “\(t.title)” (PCM, sample exact)…", p)
                 }
                 let sr = t.sampleRate
                 var parts: [String] = []
                 if plan.cut > 0 { parts.append("cut \(Fmt.int(plan.cut)) samples (\(String(format: "%.3f", Double(plan.cut) / sr)) s) from the head") }
                 if plan.pad > 0 { parts.append("added \(Fmt.int(plan.pad)) samples of silence at the head") }
                 if plan.tail > 0 { parts.append("\(Fmt.int(plan.tail)) samples (\(String(format: "%.3f", Double(plan.tail) / sr)) s) from the tail") }
+                if let order, let src = t.sourceOrder, let target = t.channelTarget {
+                    parts.append("channels reordered \(src.text) → \(target.text) (" + order.enumerated().map { "\($0 + 1)←\($1 + 1)" }.joined(separator: " ") + ")")
+                }
                 return Prepared(path: gpacTmp.appendingPathComponent(dst.lastPathComponent).path, selector: nil, rangeEnd: nil,
-                                verify: .wav(t.url, wav, pad: plan.pad, cut: plan.cut, keep: plan.keep),
+                                verify: .wav(t.url, wav, pad: plan.pad, cut: plan.cut, keep: plan.keep, order: order),
                                 note: "“\(t.title)”: " + parts.joined(separator: ", ") + " — sample exact, no re-encoding")
             }
             if t.codecKey == "eac3" {
@@ -2639,8 +2693,9 @@ final class Project {
             case .audio:
                 f["@type"] = "Audio"
                 if t.isPCM {
-                    let tag = spec.writeChannelMap && spec.isMOV ? t.channelMap.tag(channels: t.channels, layout: t.channelLayout) : nil
+                    let tag = spec.isMOV ? t.outputLayoutTag(writeLabels: spec.writeChannelMap) : nil
                     f["ChannelLayout"] = tag.map(ChannelMap.layoutName)
+                    if let src = t.sourceOrder, let target = t.channelTarget, t.channelPermutation != nil { f["ChannelOrder"] = "\(src.text) → \(target.text)" }
                 }
                 if let p = spec.plans[t.id], t.sampleRate > 0 {
                     var samples = p.pad + p.keep
@@ -2677,7 +2732,7 @@ final class Project {
         guard let out = outputURL else { return nil }
         let inc = included
         var plans: [UUID: TrimPlan] = [:]
-        for t in inc where t.kind == .audio { if let p = plan(for: t), !p.isIdentity { plans[t.id] = p } }
+        for t in inc where t.kind == .audio { if let p = plan(for: t), !p.isIdentity || t.channelPermutation != nil { plans[t.id] = p } }
         return JobSpec(tracks: inc, plans: plans, output: out, disableExtraAudio: disableExtraAudio, interleaveMs: interleaveMs,
                        writeChannelMap: writeChannelMap, verifyAudio: verifyAudio, verifyVideo: verifyVideo,
                        fixColorTag: fixColorTag, isMOV: container == .mov, reference: reference,
@@ -2691,7 +2746,7 @@ final class Project {
                 return JobRunner.Prepared(path: "<HEVC encoded from \(t.url.lastPathComponent)>", selector: nil, rangeEnd: nil, verify: .none, note: nil,
                                           importOptions: e.importOptions(mov: spec.isMOV))
             }
-            return JobRunner.Prepared(path: (spec.plans[t.id] != nil ? "<trimmed temp copy of \(t.url.lastPathComponent)>" : t.url.path),
+            return JobRunner.Prepared(path: (spec.plans[t.id].map { $0.isIdentity ? "<channel-reordered temp copy of \(t.url.lastPathComponent)>" : "<trimmed temp copy of \(t.url.lastPathComponent)>" } ?? t.url.path),
                                selector: spec.plans[t.id] != nil ? nil : t.selector,
                                rangeEnd: spec.plans[t.id] != nil ? nil : t.wav.flatMap { $0.hasTrailingChunks ? $0.dataEnd : nil },
                                verify: .none, note: nil)
@@ -2886,6 +2941,7 @@ struct CLIArgs {
     var quality: String?
     var speed: String?
     var refLateFrames = 0.0
+    var channelOrder: String?            // "--channel-order \"L C R Ls Rs LFE\"": listen to each PCM track and write its channels in this order
     var pictureCheck = true
 
     init(_ a: [String]) {
@@ -2916,6 +2972,7 @@ struct CLIArgs {
             case "--quality": quality = next()
             case "--speed": speed = next()
             case "--ref-late-frames": refLateFrames = Double(next() ?? "") ?? 0
+            case "--channel-order": channelOrder = next()
             case "--no-picture-check": pictureCheck = false
             case "--write-report": writeReport = next()
             default: break
@@ -2976,6 +3033,30 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
         print("  •", project.hdr.dvProblem ?? project.hdr.dvSummary?.line ?? "?")
     }
     project.referenceLateFrames = a.refLateFrames
+    if let co = a.channelOrder {
+        let tokens = co.split(separator: " ")
+        let roles = tokens.compactMap { ChannelRole(rawValue: String($0)) }
+        let order = ChannelOrder(roles: roles)
+        if roles.count != tokens.count || !order.isComplete {
+            print("  • --channel-order “\(co)”: each role must be one of \(ChannelRole.allCases.map(\.rawValue).joined(separator: " ")) and used once — ignored")
+        } else {
+            for i in project.tracks.indices where project.tracks[i].canReorder {
+                let t = project.tracks[i]
+                guard roles.count == t.channels, let wav = t.wav else { print("  • “\(t.title)”: --channel-order names \(roles.count) channels, the track has \(t.channels) — skipped"); continue }
+                print("Listening to “\(t.title)” to tell its channels apart…")
+                guard let r = ChannelID.analyze(url: t.url, info: wav) else { print("  • could not analyse"); continue }
+                project.tracks[i].channelRoles = r.guesses.map(\.role)
+                project.tracks[i].channelConfidence = r.overall
+                project.tracks[i].channelReport = r.text
+                guard order.canBeWritten(from: r.detected) else {
+                    print(String(format: "  • heard %@ (%.0f%% sure): %@ is not made of those roles — written as it is", r.detected.text, r.overall * 100, co)); continue
+                }
+                project.tracks[i].channelTarget = order
+                print(String(format: "  • heard %@ (%.0f%% sure) → written as %@%@", r.detected.text, r.overall * 100, co,
+                             project.tracks[i].channelPermutation == nil ? " (already in that order)" : ""))
+            }
+        }
+    }
     if a.align, let ref = project.reference {
         let targets = project.tracks.filter { $0.kind == .audio && $0.include && $0.id != ref.id }
         print("Aligning \(targets.count) track(s) to the reference “\(ref.title)” (\(ref.url.lastPathComponent))" +
@@ -3121,6 +3202,19 @@ func snapshot(_ args: [String]) {
         let until = Date().addingTimeInterval(20)
         while EngineStatus.shared.versions.isEmpty && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
         root = AnyView(view)
+    } else if args.contains("--channelsheet") {
+        // Channel order sheet of the first PCM track added: --channelsheet --add FILE.wav [--target "L C R Ls Rs LFE"]
+        func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        project = buildProject(a, output: a.dest)
+        guard let t = project.tracks.first(where: { $0.canReorder }), let wav = t.wav else { print("ERROR: add a multichannel PCM WAV with --add"); return }
+        guard let r = ChannelID.analyze(url: t.url, info: wav) else { print("ERROR: could not analyse"); return }
+        print(r.text)
+        var track = t
+        track.channelRoles = r.guesses.map(\.role); track.channelConfidence = r.overall; track.channelReport = r.text
+        if let tv = value("--target") { track.channelTarget = ChannelOrder(roles: tv.split(separator: " ").compactMap { ChannelRole(rawValue: String($0)) }) }
+        chrome = false
+        size = NSSize(width: 760, height: 1000)
+        root = AnyView(ChannelOrderSheet(track: .constant(track), initialReport: r).frame(width: 760, height: 1000, alignment: .top).background(Color(nsColor: .windowBackgroundColor)))
     } else if args.contains("--pictureviewer") {
         // Picture Sync Check: --pictureviewer FILE.mov | --pictureviewer --video V --add A [--align --ref-late-frames N]  [--point N]
         func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
@@ -3244,6 +3338,7 @@ enum Entry {
         case "--snapshot": snapshot(Array(args.dropFirst()))
         case "--picture": exit(pictureCLI(Array(args.dropFirst())))
         case "--qc": exit(RenderQC.cli(Array(args.dropFirst())))
+        case "--channels": exit(ChannelID.cli(Array(args.dropFirst())))
         case "--atmos-snapshot": atmosSnapshot(Array(args.dropFirst()))
         default: BrosMuxApp.main()
         }
