@@ -2862,24 +2862,21 @@ final class Inspector {
 struct BrosMuxApp: App {
     @State private var project = Project()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @State private var showWelcome = true
 
     var body: some Scene {
-        // The welcome is its own window (like Xcode's): the main window is born with its split view and toolbar in
-        // place. Swapping a plain view for a NavigationSplitView inside one window leaves the toolbar, the safe area
+        // One window, born complete (split view, toolbar, inspector); the welcome is a sheet over it. Swapping the
+        // root view for a NavigationSplitView, or opening a second window at launch, left the toolbar, the safe area
         // and the columns half configured — content under the toolbar, no scrolling, an empty sidebar.
-        Window("Welcome to BROS-MUX", id: "welcome") {
-            WelcomeView()
-                .environment(project)
-                .onAppear { delegate.project = project }
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultSize(width: 1180, height: 820)
         Window(AppInfo.name, id: "main") {
             ContentView()
                 .environment(project)
                 .frame(minWidth: 1180, minHeight: 720)
                 .onAppear { delegate.project = project }
+                .sheet(isPresented: $showWelcome) {
+                    WelcomeView(onStart: { showWelcome = false }).environment(project)
+                }
+                .onChange(of: project.tracks.count) { _, n in if n > 0 { showWelcome = false } }   // a file from the Finder skips the welcome
         }
         .defaultSize(width: 1480, height: 940)
         .windowToolbarStyle(.unified)
@@ -3198,8 +3195,8 @@ func snapshot(_ args: [String]) {
         root = AnyView(SyncViewerSheet(model: m, standalone: true))
     } else if args.contains("--welcome") {
         project = Project()
-        let view = WelcomeView().environment(project).frame(width: 1180, height: 820).background(Color(nsColor: .windowBackgroundColor))
-        size = NSSize(width: 1480, height: 940)
+        let view = WelcomeView().environment(project).background(Color(nsColor: .windowBackgroundColor))
+        size = NSSize(width: 1040, height: 700)
         EngineStatus.shared.loadVersions()
         let until = Date().addingTimeInterval(20)
         while EngineStatus.shared.versions.isEmpty && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }

@@ -65,16 +65,8 @@ struct WelcomeView: View {
     var onStart: () -> Void = {}
     @Bindable var status = EngineStatus.shared
     @Environment(\.colorScheme) private var scheme
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismissWindow) private var dismissWindow
-    @Environment(Project.self) private var project
 
-    /// Opens the muxer window and closes this one (also when a file arrives from the Finder while the welcome is up)
-    func start() {
-        onStart()
-        openWindow(id: "main")
-        dismissWindow(id: "welcome")
-    }
+    func start() { onStart() }
 
     var body: some View {
         ZStack {
@@ -82,17 +74,17 @@ struct WelcomeView: View {
             RadialGradient(colors: [Color.accentColor.opacity(scheme == .dark ? 0.18 : 0.10), .clear], center: .top, startRadius: 20, endRadius: 700)
                 .ignoresSafeArea()
             VStack(spacing: 0) {
-                Spacer(minLength: 24)
+                Spacer(minLength: 16)
                 VStack(spacing: 14) {
-                    ABMark(color: .primary).frame(height: 84)
+                    ABMark(color: .primary).frame(height: 64)
                     VStack(spacing: 4) {
-                        (Text("BROS-MUX").font(.system(size: 40, weight: .semibold, design: .rounded))
-                         + Text(" (v.\(AppInfo.version))").font(.system(size: 22, weight: .regular, design: .rounded)).foregroundStyle(.secondary))
+                        (Text("BROS-MUX").font(.system(size: 34, weight: .semibold, design: .rounded))
+                         + Text(" (v.\(AppInfo.version))").font(.system(size: 20, weight: .regular, design: .rounded)).foregroundStyle(.secondary))
                             .tracking(2)
                         Text("Lossless muxing, sync and QC for film delivery").font(.title3).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.bottom, 28)
+                .padding(.bottom, 18)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("What is inside this one muxer").font(.headline).padding(.leading, 2)
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: DS.gap), GridItem(.flexible(), spacing: DS.gap)], alignment: .leading, spacing: DS.gap) {
@@ -101,7 +93,7 @@ struct WelcomeView: View {
                 }
                 .frame(maxWidth: 980)
                 .padding(.horizontal, DS.margin)
-                Spacer(minLength: 20)
+                Spacer(minLength: 14)
                 Button(action: start) {
                     Text("Start").font(.title3.weight(.semibold)).foregroundStyle(.white)
                         .frame(minWidth: 200).padding(.vertical, 11).padding(.horizontal, 24)
@@ -111,12 +103,11 @@ struct WelcomeView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
                 .help("Open the muxer (Return)")
-                Text("Abdala Brothers").font(.caption).foregroundStyle(.tertiary).padding(.top, 14).padding(.bottom, 20)
+                Text("Abdala Brothers").font(.caption).foregroundStyle(.tertiary).padding(.top, 10).padding(.bottom, 14)
             }
         }
-        .frame(width: 1180, height: 820)
+        .frame(width: 1040, height: 700)
         .onAppear { status.loadVersions() }
-        .onChange(of: project.tracks.count) { _, n in if n > 0 { start() } }
     }
 
     func engineRow(_ e: Engine) -> some View {
@@ -136,7 +127,7 @@ struct WelcomeView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(10)
+        .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).fill(DS.groupFill))
         .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(DS.groupStroke, lineWidth: 1))
