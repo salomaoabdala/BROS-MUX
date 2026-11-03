@@ -44,9 +44,16 @@ done
 APP=/Applications/BROS-MUX.app
 STAGE=$(mktemp -d)
 zips=(BROS-MUX-v*.zip dist/BROS-MUX-v*.zip); ZIP=${zips[1]}
-if [ "$1" != "--build" ] && [ -z "$ZIP" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+if [ "$1" != "--build" ] && [ -z "$ZIP" ]; then
   say "Downloading the latest release from GitHub"
-  mkdir -p dist && gh release download --pattern 'BROS-MUX-v*.zip' --dir dist --clobber 2>/dev/null || true
+  mkdir -p dist
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    gh release download --pattern 'BROS-MUX-v*.zip' --dir dist --clobber 2>/dev/null || true
+  else
+    # the repository is public: the release asset can be fetched without any login
+    URL=$(curl -fsSL https://api.github.com/repos/salomaoabdala/BROS-MUX/releases/latest | grep -o '"browser_download_url": *"[^"]*BROS-MUX-v[^"]*\.zip"' | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')
+    [ -n "$URL" ] && curl -fL --progress-bar -o "dist/$(basename "$URL")" "$URL" || warn "could not download the release; will build from source if possible"
+  fi
   zips=(dist/BROS-MUX-v*.zip); ZIP=${zips[1]}
 fi
 
