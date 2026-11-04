@@ -567,7 +567,7 @@ final class HDRSettings {
         var targetMbps = 100               // Average / Constant: the average or the constant bitrate
         var maxMbps = 160                  // Average: the peak (VBV); Constant: = targetMbps
         var floor = true                   // Average / Constant: no frame worse than QP `floorQP`, however easy the scene
-        static let floorQP = 18
+        static let floorQP = 16
         /// `--rate MODE --mbps N [--max-mbps N] [--no-floor]`: nil when no rate option was given
         static func fromCLI(mode: RateMode?, mbps: Int?, maxMbps: Int?, floor: Bool) -> Rate? {
             guard let mode, mode != .quality else { return mode == nil ? nil : Rate() }
