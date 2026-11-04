@@ -471,7 +471,9 @@ def finish_job(job, info, proc, now):
         job["pass_no"] = info["pass_no"]
         job["pass_of"] = 2
     exact, src = frame_from_encode(info, job)
-    if exact and (not job["frame"] or src == "stats"):
+    # o frame do log e ao vivo; o arquivo de estatisticas e gravado em blocos e
+    # chega a ficar 2 min atras. So usar o encode quando nao ha log.
+    if exact and not job["frame"]:
         job["frame"], job["frame_src"] = exact, src
     if not job["stage"]:
         if job["pass_no"]:

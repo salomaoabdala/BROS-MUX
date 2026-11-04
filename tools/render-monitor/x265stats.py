@@ -83,8 +83,14 @@ def _read(path):
             while len(st["frames"]) <= frame:
                 st["frames"].append(None)
             st["frames"][frame] = (bits, bits * qscale(q), typ)
-    frames = [x for x in st["frames"] if x]
-    return frames, not f.endswith(".temp")
+    # o x265 grava em ordem de codificacao, entao o fim do arquivo tem buracos:
+    # usa so o prefixo contiguo, para o indice da lista ser mesmo o numero do frame
+    cut = len(st["frames"])
+    for i, x in enumerate(st["frames"]):
+        if x is None:
+            cut = i
+            break
+    return st["frames"][:cut], not f.endswith(".temp")
 
 
 def allocate(weights, total_bits, cap):
@@ -175,9 +181,21 @@ def profile(path, target_mbps, max_mbps, fps, buckets=420, current=None):
     }
 
 
+_cum_cache = {}
+
+
 def cumulative_bits(path, target_mbps, max_mbps, fps):
     """Bits acumulados previstos por frame — usado para saber em que frame a
     passada 2 esta, pelo tamanho do arquivo que ela ja escreveu."""
+    f = stats_file(path)
+    try:
+        size = os.path.getsize(f) if f else 0
+    except OSError:
+        size = 0
+    key = (path, size, target_mbps, max_mbps, fps)
+    with _lock:                      # nao segurar o lock durante o read(): ele pega o mesmo
+        if _cum_cache.get("key") == key:
+            return _cum_cache["value"]
     frames, _c = read(path)
     n = len(frames)
     if n < 2:
@@ -193,6 +211,8 @@ def cumulative_bits(path, target_mbps, max_mbps, fps):
     for e in est:
         run += e
         out.append(run)
+    with _lock:
+        _cum_cache["key"], _cum_cache["value"] = key, out
     return out
 
 
