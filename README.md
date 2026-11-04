@@ -75,6 +75,9 @@ O binário dentro do app aceita alguns comandos sem interface:
 | `HDR.swift` | Dolby Vision / HDR10+ |
 | `AtmosDecoder.swift`, `AtmosOAMD.swift`, `AtmosViz.swift` | metadados Atmos e visualizador 3D |
 | `Monitor.swift`, `Welcome.swift` | monitor de sistema e tela inicial |
+| `CHANGELOG.md` | o que cada versão adicionou, mudou e corrigiu |
+| `PLANO-TRANSCODE.md` | plano da v1.6: aba Transcode e alerta de recodificação no Mux |
+| `CLAUDE.md` | regras do projeto para o Claude (toda versão atualiza o CHANGELOG) |
 | `CODE-REVIEW-2026-11-03.md` | revisão de código (22 achados confirmados, ideias de produto) |
 | `ANALISE-2026-11-03.md` | ffmpeg × BROS-MUX, TrueHD, Zidoo, bitrates |
 | `RENDER-QC-2DIE4-2026-11-03.txt` | resultado do Render QC no arquivo entregue à Academia |
