@@ -238,6 +238,15 @@ struct ProbeStream: Decodable {
     let duration: String?
     let tags: [String: String]?
     let disposition: [String: Int]?
+    // colour and geometry (Transcode.swift reads them)
+    let color_range: String?
+    let color_space: String?
+    let color_transfer: String?
+    let color_primaries: String?
+    let field_order: String?
+    let sample_aspect_ratio: String?
+    let nb_frames: String?
+    let chroma_location: String?
 }
 
 enum TrackKind: String {
@@ -360,6 +369,8 @@ struct Track: Identifiable {
     var rolesSource: String? = nil             // where the group's channel roles came from (file labels, names, listening, by hand)
     var listening = false                      // the group is being listened to in the background (ChannelID)
     var isGroup: Bool { !members.isEmpty }
+    /// Video: the picture as the file describes it (codec, bits, chroma, colour tags…) for the Transcode engine
+    var source: SourceVideo? = nil
 
     var isPCM: Bool { codecKey.hasPrefix("pcm_") }
     var canReorder: Bool { kind == .audio && isPCM && (wav != nil || isGroup) && channels >= 2 }
@@ -561,7 +572,9 @@ enum Probe {
             else if transfer == "HLG" { badges.append("HLG") }
             if codec == "dnxhd" { warnings.append("DNxHD/HR may not be accepted by MP4Box.") }
             if codec == "hevc" { warnings.append("The Academy does not accept HEVC — only ProRes 422 HQ or H.264.") }
-            return make(.video, name, d.joined(separator: " · "), title: srcTitle ?? "Video")
+            var t = make(.video, name, d.joined(separator: " · "), title: srcTitle ?? "Video")
+            t.source = SourceVideo(stream: s, mi: mi, url: url, fallbackDuration: duration)
+            return t
 
         case "audio":
             let ch = s.channels ?? 0
@@ -1746,7 +1759,7 @@ struct JobSpec {
     var reference: Track?            // sync reference (for the final check)
     var isMKV = false                // MP4Box writes MP4, then the streams are copied into Matroska
     var referenceOffset = 0.0        // the reference is this late (s) vs its picture: the final check corrects for it
-    var videoEncode: VideoEncodePlan? = nil   // playback version: the picture is re-encoded (HDR.swift)
+    var videoEncode: TranscodePlan? = nil     // playback version: the picture is re-encoded (Transcode.swift)
     var pictureCheck = true                   // after muxing, check the sound against the picture's hard cuts (PictureSync.swift)
 }
 
@@ -1770,7 +1783,7 @@ final class JobRunner {
         if let p, p.isRunning { p.terminate() }
     }
 
-    static func estimatedBytes(_ t: Track, plan: TrimPlan?, encode: VideoEncodePlan? = nil) -> Double {
+    static func estimatedBytes(_ t: Track, plan: TrimPlan?, encode: TranscodePlan? = nil) -> Double {
         if t.kind == .video, let encode { return encode.estimatedBytes }
         if t.kind == .audio, let plan, t.sampleRate > 0 {
             let seconds = Double(plan.pad + plan.keep) / t.sampleRate
@@ -1808,8 +1821,7 @@ final class JobRunner {
             }
         }
         if let e = spec.videoEncode {
-            if e.dolbyVision != nil && Tools.doviTool == nil { return "dovi_tool isn't installed (needed for Dolby Vision). Run: brew install dovi_tool" }
-            if e.hdr10plus != nil && Tools.hdr10plusTool == nil { return "hdr10plus_tool isn't installed (needed for HDR10+). Run: brew install hdr10plus_tool" }
+            if let p = e.problem { return p }
             if e.frames <= 0 || e.width <= 0 { return "Couldn't read the picture's size and length." }
         } else if let v = spec.tracks.first(where: { $0.kind == .video }), v.url.pathExtension.lowercased() == "mxf" {
             return "The picture is an MXF master — it can't be copied into \(out.pathExtension.uppercased()) as it is. Turn on “Encode the picture for playback” (HDR panel)."
@@ -1900,6 +1912,9 @@ final class JobRunner {
 
         // 3. post-processing on the temporary file
         var ok = true, warn = false
+        if let v = spec.tracks.first(where: { $0.kind == .video }) {
+            lines.insert(spec.videoEncode.map { "Picture: RE-ENCODED (\($0.source.codecName) → \($0.outputCodecName))" } ?? "Picture: bit-exact copy (\(v.codecName))", at: 0)
+        }
         let outStreams = Probe.raw(tmpOut)?.streams ?? []
         func outStream(for i: Int) -> ProbeStream? {
             let t = spec.tracks[i]
@@ -1942,7 +1957,7 @@ final class JobRunner {
         }
         if let e = spec.videoEncode {
             onStage("Checking the encoded picture (frames, Dolby Vision, HDR10, HDR10+)…", 0)
-            let r = VideoEncoder.verify(tmpOut, plan: e, rpu: encodedRPU, tmp: tmp, cancel: cancel) { s, p in self.onStage(s, p) }
+            let r = Transcode.verifyElementary(tmpOut, plan: e, rpu: encodedRPU, tmp: tmp, cancel: cancel) { s, p in self.onStage(s, p) }
             if cancel.isSet { return cancelledResult }
             lines += r.lines
             if !r.ok { ok = false }
@@ -2052,7 +2067,7 @@ final class JobRunner {
     /// Files are written into `tmp` (on the destination drive); MP4Box gets the same files through `gpacTmp` (safe path).
     private func prepare(_ t: Track, index: Int, tmp: URL, gpacTmp: URL) throws -> Prepared {
         if t.kind == .video, let e = spec.videoEncode {
-            let r = try VideoEncoder.run(e, tmp: tmp, cancel: cancel, stage: { s, p in self.onStage(s, p) }, log: { self.onLog($0) })
+            let r = try Transcode.encodeElementary(e, tmp: tmp, cancel: cancel, stage: { s, p in self.onStage(s, p) }, log: { self.onLog($0) })
             encodedRPU = r.rpu
             return Prepared(path: gpacTmp.appendingPathComponent(r.hevc.lastPathComponent).path, selector: nil, rangeEnd: nil,
                             verify: .none, note: r.notes.joined(separator: "\n"), importOptions: e.importOptions(mov: spec.isMOV))
@@ -2286,13 +2301,13 @@ enum RunState: Equatable {
 }
 
 enum AppMode: String, CaseIterable, Identifiable {
-    case mux, inspect, atmos, qc
+    case mux, transcode, inspect, atmos, qc
     var id: String { rawValue }
     var label: String {
-        switch self { case .mux: return "Mux"; case .inspect: return "File Checker"; case .atmos: return "Atmos Visualizer"; case .qc: return "Render QC" }
+        switch self { case .mux: return "Mux"; case .transcode: return "Transcode"; case .inspect: return "File Checker"; case .atmos: return "Atmos Visualizer"; case .qc: return "Render QC" }
     }
     var symbol: String {
-        switch self { case .mux: return "square.stack.3d.down.forward"; case .inspect: return "checkmark.seal"; case .atmos: return "cube.transparent"; case .qc: return "checkmark.shield" }
+        switch self { case .mux: return "square.stack.3d.down.forward"; case .transcode: return "arrow.triangle.2.circlepath"; case .inspect: return "checkmark.seal"; case .atmos: return "cube.transparent"; case .qc: return "checkmark.shield" }
     }
 }
 
@@ -2382,21 +2397,29 @@ final class Project {
         let t = v.mi?["transfer_characteristics"] ?? ""
         return t == "PQ" || t == "HLG" || v.mi?["HDR_Format"] != nil || v.url.pathExtension.lowercased() == "mxf"
     }
-    /// What the job will encode (nil = the picture is copied)
-    var encodePlan: VideoEncodePlan? {
-        guard hdr.encode, let v = videoTrack else { return nil }
-        let segments: [VideoEncodePlan.Segment] = v.imfSegments.isEmpty
+    /// What the job will encode (nil = the picture is copied). The Mux tab's one exception: HEVC 10-bit with the source's
+    /// own colour and the Dolby Vision / HDR10+ metadata — built on the same TranscodePlan the Transcode tab uses.
+    var encodePlan: TranscodePlan? {
+        guard hdr.encode, let v = videoTrack, let src = v.source else { return nil }
+        var p = TranscodePlan(source: src, video: .hevc(quality: hdr.quality, speed: hdr.speed))
+        p.segments = v.imfSegments.isEmpty
             ? [.init(file: v.url, start: 0, count: videoFrames)]
-            : v.imfSegments.flatMap { r in Array(repeating: VideoEncodePlan.Segment(file: r.file, start: r.entryPoint, count: r.duration), count: r.repeatCount) }
+            : v.imfSegments.flatMap { r in Array(repeating: TranscodePlan.Segment(file: r.file, start: r.entryPoint, count: r.duration), count: r.repeatCount) }
+        p.frames = videoFrames; p.fps = videoFPS; p.width = videoWidth; p.height = videoHeight
+        p.rgbSource = (v.mi?["ColorSpace"] ?? "").contains("RGB") || src.color.isRGB
         let dv = hdr.dolbyVision ? hdr.dvSource : nil
-        return VideoEncodePlan(segments: segments, frames: videoFrames, fps: videoFPS, width: videoWidth, height: videoHeight,
-                               rgbSource: (v.mi?["ColorSpace"] ?? "").contains("RGB"), quality: hdr.quality, speed: hdr.speed,
-                               mastering: hdr.mastering, maxCLL: hdr.maxCLL, maxFALL: hdr.maxFALL, dolbyVision: dv,
-                               dvXML: dv == nil ? nil : hdr.dvXMLReady, hdr10plus: hdr.hdr10plus ? hdr.hdr10plusJSON : nil)
+        p.hdr = HDRMeta(mastering: hdr.mastering, maxCLL: hdr.maxCLL, maxFALL: hdr.maxFALL, dolbyVision: dv,
+                        dvXML: dv == nil ? nil : hdr.dvXMLReady, hdr10plus: hdr.hdr10plus ? hdr.hdr10plusJSON : nil)
+        p.container = container
+        p.audio = .none          // the audio goes through the bit-exact mux path, never through ffmpeg
+        return p
     }
     /// Problems with the HDR metadata that stop the job before any encoding
     var hdrProblem: String? {
         guard hdr.encode else { return nil }
+        if let c = videoTrack?.source?.color, c.isTagged, !c.isHDR, c.transfer != nil {
+            return "The picture is tagged \(SourceColor.name(c.primaries)) / \(SourceColor.name(c.transfer)) (SDR): HDR10 and Dolby Vision metadata can't describe it. Check the source, or make an SDR HEVC in the Transcode tab."
+        }
         if hdr.dolbyVision && hdr.dvSource != nil {
             if hdr.dvChecking { return "Still reading the Dolby Vision metadata — try again in a moment." }
             if let p = hdr.dvProblem { return p }
@@ -2446,6 +2469,8 @@ final class Project {
         hdr.imf = pkg
         insert(r.tracks)
         hdr.encode = true
+        hdr.autoEnabledBy = pkg.cpl
+        hdr.autoReason = "An IMF package was added. Its master picture (JPEG 2000 in MXF) plays nowhere, so a playback version is made: HEVC 10-bit" + (r.dv != nil ? " with the package's Dolby Vision metadata." : ".")
         hdr.applySourceMastering(videoTrack?.mi)
         if let dv = r.dv {
             hdr.dvSource = dv; hdr.dolbyVision = true
@@ -2475,6 +2500,7 @@ final class Project {
         if mode == .inspect, let u = urls.first { inspector.load(u); return }
         if mode == .atmos, let u = urls.first { atmos.load(u); return }
         if mode == .qc, let u = urls.first { RenderQCModel.shared.open(u); return }
+        if mode == .transcode { TranscodeModel.shared.add(urls); return }
         guard !busy else { return }
         // IMF packages (a folder with an ASSETMAP, or its CPL) are read as one picture
         let imfs = urls.filter { IMF.packageFolder(for: $0) != nil }
@@ -2485,9 +2511,11 @@ final class Project {
             let ext = u.pathExtension.lowercased()
             if ext == "xml", IMF.rootName(u) == "DolbyLabsMDF" {
                 hdr.dvSource = .xml(u); hdr.dolbyVision = true; hdr.encode = true; metadata.append(u)
+                hdr.autoEnabledBy = u; hdr.autoReason = "Dolby Vision metadata was added. To embed it, the picture has to become HEVC 10-bit, so BROS-MUX turned the re-encoding on by itself." 
                 hdr.checkDolbyVision(width: videoWidth, height: videoHeight, frames: videoFrames)
             } else if ext == "json", let n = HDR10Plus.frames(u) {
                 hdr.hdr10plusJSON = u; hdr.hdr10plus = true; hdr.hdr10plusFrames = n; hdr.encode = true; metadata.append(u)
+                hdr.autoEnabledBy = u; hdr.autoReason = "HDR10+ metadata was added. To embed it, the picture has to become HEVC 10-bit, so BROS-MUX turned the re-encoding on by itself." 
             }
         }
         var files: [URL] = []
@@ -2661,11 +2689,11 @@ final class Project {
 
     func openPanel() {
         let p = NSOpenPanel()
-        p.allowsMultipleSelection = mode == .mux
-        p.canChooseDirectories = mode == .mux
+        p.allowsMultipleSelection = mode == .mux || mode == .transcode
+        p.canChooseDirectories = mode == .mux || mode == .transcode
         p.canChooseFiles = true
-        p.message = mode == .mux ? "Choose the video, audio and subtitle files (or an IMF package folder)" : mode == .inspect ? "Choose the file to inspect" : mode == .qc ? "Choose the rendered file to check" : "Choose a Dolby Atmos (E-AC-3 JOC) file"
-        p.prompt = mode == .mux ? "Add" : mode == .inspect ? "Inspect" : mode == .qc ? "Check" : "Visualize"
+        p.message = mode == .mux ? "Choose the video, audio and subtitle files (or an IMF package folder)" : mode == .transcode ? "Choose the files to transcode (a new file is written for each; the originals are never touched)" : mode == .inspect ? "Choose the file to inspect" : mode == .qc ? "Choose the rendered file to check" : "Choose a Dolby Atmos (E-AC-3 JOC) file"
+        p.prompt = mode == .mux || mode == .transcode ? "Add" : mode == .inspect ? "Inspect" : mode == .qc ? "Check" : "Visualize"
         if p.runModal() == .OK { add(p.urls) }
     }
 
@@ -2855,9 +2883,10 @@ final class Project {
             case .video:
                 f["@type"] = "Video"
                 if let e = spec.videoEncode {
+                    let c = e.outputColor
                     f["Format"] = "HEVC"; f["Format_Profile"] = "Main 10"; f["BitDepth"] = "10"; f["ChromaSubsampling"] = "4:2:0"; f["ColorSpace"] = "YUV"
-                    f["colour_primaries"] = "BT.2020"; f["transfer_characteristics"] = "PQ"; f["matrix_coefficients"] = "BT.2020 non-constant"
-                    f["HDR_Format"] = e.formats; f["BitRate"] = String(e.quality.averageMbps * 1_000_000); f["Gamma"] = nil
+                    f["colour_primaries"] = Transcode.miName(c.primaries); f["transfer_characteristics"] = Transcode.miName(c.transfer); f["matrix_coefficients"] = Transcode.miName(c.matrix)
+                    f["HDR_Format"] = e.hdr?.formats; f["BitRate"] = String(e.estimatedBytes * 8 / max(e.seconds, 0.001)); f["Gamma"] = nil
                 } else if spec.fixColorTag { f["colour_primaries"] = "BT.709"; f["transfer_characteristics"] = "BT.709"; f["matrix_coefficients"] = "BT.709"; f["Gamma"] = nil }
             case .audio:
                 f["@type"] = "Audio"
@@ -2933,8 +2962,8 @@ final class Project {
         let mp4 = spec.isMKV ? spec.output.deletingPathExtension().appendingPathExtension("mp4") : spec.output
         var text = "MP4Box " + quote(JobRunner.arguments(spec, prepared: fake, tmp: tmp, output: mp4))
         if let e = spec.videoEncode {
-            text = "ffmpeg " + quote(VideoEncoder.ffmpegArguments(e, concat: nil, output: tmp.appendingPathComponent("video.hevc"))) +
-                (e.hdr10plus != nil ? "\nhdr10plus_tool inject …" : "") + (e.dolbyVision != nil ? "\ndovi_tool generate --xml … -p 8.1 && dovi_tool inject-rpu …" : "") + "\n" + text
+            text = "ffmpeg " + quote(Transcode.arguments(e, concat: nil, output: tmp.appendingPathComponent("video.hevc"), elementary: true)) +
+                (e.hdr?.hdr10plus != nil ? "\nhdr10plus_tool inject …" : "") + (e.hdr?.dolbyVision != nil ? "\ndovi_tool generate --xml … -p 8.1 && dovi_tool inject-rpu …" : "") + "\n" + text
         }
         if spec.isMKV { text += "\nffmpeg " + quote(JobRunner.mkvArguments(spec, from: mp4, to: spec.output)) }
         return text
@@ -2950,6 +2979,18 @@ final class Project {
         guard canRun, let spec = jobSpec else { return }
         if let problem = hdrProblem ?? JobRunner.validate(spec) {
             resultLines = [problem]; resultState = .failed; state = .failed; return
+        }
+        if let e = spec.videoEncode, !hdr.confirmSkipped {
+            // the Mux tab's one exception, said out loud before hours of encoding
+            let a = NSAlert()
+            a.messageText = "The picture will be RE-ENCODED"
+            a.informativeText = "\(e.source.summary) → \(e.outputCodecName) · \(e.outputBits)-bit \(e.outputChroma) · \(e.formats)\nAbout \(Fmt.hm(e.estimatedSeconds)) of encoding on this Mac (rough; it can run overnight — the Mac won't sleep). The audio stays bit for bit."
+            a.showsSuppressionButton = true
+            a.suppressionButton?.title = "Don't ask again for this project"
+            a.addButton(withTitle: "Re-encode & Mux"); a.addButton(withTitle: "Cancel")
+            let r = a.runModal()
+            if a.suppressionButton?.state == .on { hdr.confirmSkipped = true }
+            if r != .alertFirstButtonReturn { return }
         }
         if FileManager.default.fileExists(atPath: spec.output.path) {
             let a = NSAlert()
@@ -3196,9 +3237,14 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
     if let q = a.quality.flatMap({ HDRSettings.Quality(rawValue: $0) }) { project.hdr.quality = q }
     if let s = a.speed.flatMap({ HDRSettings.Speed(rawValue: $0) }) { project.hdr.speed = s }
     if let d = a.dv {
+        // like dropping the XML on the window: the re-encoding switches itself on, and says so
         let u = URL(fileURLWithPath: d)
         project.hdr.dvSource = u.pathExtension.lowercased() == "mxf" ? .isxd([.init(file: u, entry: 0, count: project.videoFrames)]) : .xml(u)
         project.hdr.dolbyVision = true
+        if !project.hdr.encode {
+            project.hdr.encode = true; project.hdr.autoEnabledBy = u
+            project.hdr.autoReason = "Dolby Vision metadata was added. To embed it, the picture has to become HEVC 10-bit, so BROS-MUX turned the re-encoding on by itself."
+        }
     }
     if let h = a.hdr10plus {
         let u = URL(fileURLWithPath: h)
@@ -3270,7 +3316,7 @@ func runJobCLI(_ args: [String]) -> Int32 {
     if let l = project.predictedLevel { print("\nPREDICTED ACADEMY SEAL: \(l.emoji) \(l.title)") }
     guard let spec = project.jobSpec else { print("No destination (-o)."); return 2 }
     if let p = project.hdrProblem { print("HDR:", p); return 1 }
-    if let e = spec.videoEncode { print("\nENCODE: \(e.formats) · \(Fmt.int(e.frames)) frames @ \(e.fps) · \(e.width)×\(e.height) · x265 \(e.speed.preset) · quality \(e.quality.label) · HDR10 \(e.mastering.text), MaxCLL \(project.hdr.maxCLL), MaxFALL \(project.hdr.maxFALL)") }
+    if let e = spec.videoEncode { print("\nENCODE: \(e.formats) · \(Fmt.int(e.frames)) frames @ \(e.fps) · \(e.width)×\(e.height) · \(e.encoder) \(e.video.speed?.preset ?? "") · quality \(e.video.quality?.label ?? "") · colour \(e.outputColor.text)" + (e.hdr.map { " · HDR10 \($0.mastering.text), MaxCLL \($0.maxCLL), MaxFALL \($0.maxFALL)" } ?? "")) }
     print("\nCOMMAND: \(project.commandPreview)\n")
     let runner = JobRunner(spec)
     var lastPrint = Date.distantPast
@@ -3325,6 +3371,7 @@ func snapshot(_ args: [String]) {
     let a = CLIArgs(args)
     let quality = args.contains("--quality")
     let out = a.output ?? "snapshot.png"
+    func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
     let project: Project
     let root: AnyView
     var size = NSSize(width: 1480, height: 940)
@@ -3411,6 +3458,21 @@ func snapshot(_ args: [String]) {
         chrome = false
         size = NSSize(width: 1320, height: 1040)
         root = AnyView(PictureSyncSheet(model: m, standalone: true))
+    } else if let f = value("--transcode") {
+        // Transcode tab with a file in the queue: --snapshot --transcode FILE [--to prores422hq|h264|hevc|hevcdv] -o screen.png
+        project = Project()
+        project.mode = .transcode
+        let m = TranscodeModel.shared
+        m.clear()
+        if let p = value("--to").flatMap(TranscodePreset.named) { m.preset = p }
+        m.add([URL(fileURLWithPath: f)])
+        let until = Date().addingTimeInterval(60)
+        while m.loading > 0 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        if let item = m.selected, let plan = m.plan(for: item) {
+            for r in plan.rows { print("  \(r.changed ? "→" : "=") \(r.id): \(r.from) → \(r.to)") }
+            for w in plan.warnings { print("  ⚠ \(w)") }
+        }
+        root = AnyView(ContentView().environment(project))
     } else if let f = a.inspect {
         project = Project()
         project.mode = .inspect
@@ -3516,6 +3578,7 @@ enum Entry {
         case "--picture": exit(pictureCLI(Array(args.dropFirst())))
         case "--qc": exit(RenderQC.cli(Array(args.dropFirst())))
         case "--channels": exit(ChannelID.cli(Array(args.dropFirst())))
+        case "--transcode": exit(TranscodeModel.cli(Array(args.dropFirst())))
         case "--atmos-snapshot": atmosSnapshot(Array(args.dropFirst()))
         default: BrosMuxApp.main()
         }

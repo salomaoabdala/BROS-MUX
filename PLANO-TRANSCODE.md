@@ -1,6 +1,6 @@
 # Plano: Transcode no BROS-MUX
 
-> Documento de contexto para continuar a discussão em outra conversa. Ainda não há nada implementado; é só o plano.
+> Documento de contexto para continuar a discussão em outra conversa. **Implementado na v1.6 (2026-11-04)** — ver `CHANGELOG.md`; o que ficou de fora está anotado lá. O texto abaixo é o plano como foi escrito.
 
 ## Contexto do app
 

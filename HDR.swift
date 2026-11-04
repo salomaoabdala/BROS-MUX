@@ -495,12 +495,12 @@ final class HDRSettings {
         case master, maximum, high, compact
         var id: String { rawValue }
         var label: String { switch self { case .master: return "Master"; case .maximum: return "Maximum"; case .high: return "High"; case .compact: return "Compact" } }
-        var crf: Double { switch self { case .master: return 10; case .maximum: return 14; case .high: return 16; case .compact: return 19 } }
+        var crf: Double { switch self { case .master: return 4; case .maximum: return 14; case .high: return 16; case .compact: return 19 } }
         var maxMbps: Int { switch self { case .master: return 160; case .maximum: return 100; case .high: return 70; case .compact: return 40 } }
         var averageMbps: Double { switch self { case .master: return 100; case .maximum: return 60; case .high: return 40; case .compact: return 22 } }
         var detail: String {
             switch self {
-            case .master: return "≈ 80–160 Mb/s, well above a UHD Blu-ray — as close to the master as a player can play (Level 5.1 High tier)"
+            case .master: return "≈ 50–160 Mb/s (CRF 4; about 100 Mb/s on the 2DIE4 master), well above a UHD Blu-ray — as close to the master as a player can play (Level 5.1 High tier)"
             case .maximum: return "≈ 40–90 Mb/s, like a UHD Blu-ray"
             case .high: return "≈ 30–60 Mb/s, above the best streaming"
             case .compact: return "≈ 15–35 Mb/s, like 4K streaming"
@@ -533,6 +533,12 @@ final class HDRSettings {
     var maxFALL = 0
     var masteringSource = "defaults — check them"
     var imf: IMFPackage?
+    /// Who turned the re-encoding on: the file that made it necessary (an IMF package, a Dolby Vision XML, an HDR10+ JSON),
+    /// or nil when the person switched it on by hand. The Mux tab's banner says so.
+    var autoEnabledBy: URL?
+    var autoReason: String?
+    var bannerCollapsed = false            // "Got it": the banner shrinks to one line, but never goes away while encode is on
+    var confirmSkipped = false             // "Don't ask again for this project" on the confirmation before muxing
     @ObservationIgnored private var checkID = UUID()
 
     var formatsText: String {
@@ -547,6 +553,7 @@ final class HDRSettings {
         encode = false; dolbyVision = true; hdr10plus = false; dvSource = nil; dvSummary = nil; dvProblem = nil; dvChecking = false
         dvXMLReady = nil; hdr10plusJSON = nil; hdr10plusFrames = nil; mastering = MasteringDisplay(); maxCLL = 0; maxFALL = 0
         masteringSource = "defaults — check them"; imf = nil; checkID = UUID()
+        autoEnabledBy = nil; autoReason = nil; bannerCollapsed = false; confirmSkipped = false
     }
 
     /// HDR10 defaults from the source's own metadata (MediaInfo)
@@ -647,234 +654,7 @@ final class HDRSettings {
     }
 }
 
-// MARK: - Encoding (x265) + metadata injection
-
-/// Everything the job needs to encode the picture (frozen when the job starts)
-struct VideoEncodePlan {
-    struct Segment { let file: URL; let start: Int; let count: Int }
-    let segments: [Segment]            // frames to read, in order (an IMF CPL can splice several track files)
-    let frames: Int
-    let fps: Rational
-    let width: Int
-    let height: Int
-    let rgbSource: Bool
-    let quality: HDRSettings.Quality
-    let speed: HDRSettings.Speed
-    let mastering: MasteringDisplay
-    let maxCLL: Int
-    let maxFALL: Int
-    let dolbyVision: DolbyVisionMeta.Source?
-    let dvXML: URL?                    // already checked/rebuilt in the window
-    let hdr10plus: URL?
-    var seconds: Double { Double(frames) / max(fps.value, 1) }
-    var formats: String {
-        ((dolbyVision != nil ? ["Dolby Vision 8.1"] : []) + ["HDR10"] + (hdr10plus != nil ? ["HDR10+"] : [])).joined(separator: " + ")
-    }
-    var estimatedBytes: Double { quality.averageMbps * 1_000_000 / 8 * seconds }
-    var estimatedSeconds: Double { Double(frames) / (speed.fps4K * 8_294_400 / Double(max(width * height, 1))) }
-    /// MP4Box import options for the encoded stream
-    func importOptions(mov: Bool) -> [String] {
-        var o = ["fps=\(fps)"]
-        if dolbyVision != nil { o.append("dvp=8.1") }
-        o.append(mov ? "colr=nclc,9,16,9" : "colr=nclx,9,16,9,no")
-        return o
-    }
-}
-
-enum VideoEncoder {
-    static func ffmpegArguments(_ p: VideoEncodePlan, concat: URL?, output: URL) -> [String] {
-        var a = ["-nostdin", "-v", "error", "-nostats", "-progress", "pipe:1"]
-        if let concat { a += ["-f", "concat", "-safe", "0", "-i", concat.path] }
-        else if let s = p.segments.first {
-            if s.start > 0 { a += ["-ss", String(format: "%.6f", Double(s.start) / p.fps.value)] }
-            a += ["-i", s.file.path]
-        }
-        a += ["-map", "0:v:0", "-frames:v", "\(p.frames)", "-an", "-sn", "-dn"]
-        // 4:2:0 10-bit with UHD chroma siting (top-left = type 2); RGB masters (JPEG 2000) get the BT.2020 matrix
-        let matrix = p.rgbSource ? "out_color_matrix=bt2020:" : ""
-        a += ["-vf", "scale=\(matrix)out_range=tv:out_h_chr_pos=0:out_v_chr_pos=0:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=yuv420p10le"]
-        let vbv = p.quality.maxMbps * 1000
-        let x265 = ["log-level=error", "hdr10=1", "hdr10-opt=1", "repeat-headers=1", "aud=1", "hrd=1",
-                    "colorprim=bt2020", "transfer=smpte2084", "colormatrix=bt2020nc", "range=limited", "chromaloc=2",
-                    "master-display=\(p.mastering.x265)", "max-cll=\(p.maxCLL),\(p.maxFALL)",
-                    "vbv-maxrate=\(vbv)", "vbv-bufsize=\(vbv)", "aq-mode=3", "no-sao=1"]
-        a += ["-c:v", "libx265", "-preset", p.speed.preset, "-crf", String(format: "%.0f", p.quality.crf), "-x265-params", x265.joined(separator: ":")]
-        a += ["-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv",
-              "-f", "hevc", "-y", output.path]
-        return a
-    }
-
-    /// Encodes the picture and injects the metadata. Returns the final HEVC stream (in `tmp`), the RPU that went in, and notes.
-    static func run(_ p: VideoEncodePlan, tmp: URL, cancel: CancelFlag,
-                    stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void) throws -> (hevc: URL, rpu: URL?, notes: [String]) {
-        guard let ffmpeg = Tools.ffmpeg else { throw AppError("ffmpeg not found") }
-        let fm = FileManager.default
-        var notes: [String] = []
-
-        // 1. Dolby Vision metadata → RPU (checked against the frame count before hours of encoding)
-        var rpu: URL?
-        if let src = p.dolbyVision {
-            stage("Reading the Dolby Vision metadata…", 0)
-            var xml = p.dvXML
-            if xml == nil {
-                switch src {
-                case .xml(let u): xml = u
-                case .isxd(let parts):
-                    let x = tmp.appendingPathComponent("DolbyVision_from_IMF.xml")
-                    let r = try DolbyVisionMeta.xmlFromISXD(parts, to: x, log: log)
-                    log("Dolby Vision metadata rebuilt from the IMF: \(r.frames) frames, \(r.shots) shots\n")
-                    xml = x
-                }
-            }
-            guard let xml else { throw AppError("No Dolby Vision metadata.") }
-            let r = tmp.appendingPathComponent("DolbyVision.rpu")
-            try DolbyVisionMeta.generateRPU(xml: xml, width: p.width, height: p.height, to: r)
-            guard let s = DolbyVisionMeta.summary(r) else { throw AppError("dovi_tool couldn't summarize the generated metadata.") }
-            guard s.frames == p.frames else {
-                throw AppError("The Dolby Vision metadata covers \(Fmt.int(s.frames)) frames but the picture has \(Fmt.int(p.frames)) — they must match frame for frame.")
-            }
-            notes.append("Dolby Vision 8.1 metadata: " + s.line)
-            rpu = r
-        }
-        if let j = p.hdr10plus {
-            guard Tools.hdr10plusTool != nil else { throw AppError("hdr10plus_tool isn't installed. Run: brew install hdr10plus_tool") }
-            guard let n = HDR10Plus.frames(j) else { throw AppError("“\(j.lastPathComponent)” isn't HDR10+ metadata (no SceneInfo list).") }
-            guard n == p.frames else { throw AppError("The HDR10+ metadata has \(Fmt.int(n)) frames but the picture has \(Fmt.int(p.frames)).") }
-        }
-        if cancel.isSet { throw Cancelled() }
-
-        // 2. picture → HEVC 10-bit HDR10 (x265)
-        var concat: URL?
-        if p.segments.count > 1 {
-            var list = "ffconcat version 1.0\n"
-            for s in p.segments {
-                list += "file '\(s.file.path.replacingOccurrences(of: "'", with: "'\\''"))'\n"
-                // the concat demuxer compares outpoint with the frame's own timestamp: a 6-decimal rounding up lets one
-                // frame too many through, so the points sit a quarter frame after the first frame and half a frame before the end
-                list += String(format: "inpoint %.6f\noutpoint %.6f\n", (Double(s.start) + 0.25) / p.fps.value, (Double(s.start + s.count) - 0.5) / p.fps.value)
-            }
-            let u = tmp.appendingPathComponent("segments.ffconcat")
-            try list.write(to: u, atomically: true, encoding: .utf8)
-            concat = u
-        }
-        let base = tmp.appendingPathComponent("video.hevc")
-        let args = ffmpegArguments(p, concat: concat, output: base)
-        log("ffmpeg " + args.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ") + "\n")
-        let started = Date()
-        var done = 0
-        let label = "Encoding the picture (x265 \(p.speed.preset), quality \(p.quality.label.lowercased()))"
-        stage(label + "…", 0)
-        let status = Tools.runStreaming(ffmpeg, args, cancel: cancel, line: { l in
-            guard l.hasPrefix("frame="), let f = Int(l.dropFirst(6).trimmingCharacters(in: .whitespaces)) else { return }
-            done = f
-            let elapsed = Date().timeIntervalSince(started)
-            let fps = elapsed > 0 ? Double(f) / elapsed : 0
-            let left = fps > 0 ? Double(p.frames - f) / fps : 0
-            stage("\(label): frame \(Fmt.int(f)) of \(Fmt.int(p.frames)) · \(String(format: "%.1f", fps)) fps · \(Fmt.hm(left)) left", Double(f) / Double(max(p.frames, 1)))
-        }, log: log)
-        if cancel.isSet { throw Cancelled() }
-        guard status == 0, fm.fileExists(atPath: base.path) else { throw AppError("The picture encode failed (ffmpeg error \(status)). See the log.") }
-        guard done == p.frames else { throw AppError("The encode produced \(Fmt.int(done)) frames, \(Fmt.int(p.frames)) were expected — the source is shorter than its metadata says.") }
-        notes.append("Picture: HEVC Main 10 4:2:0 PQ BT.2020 · x265 \(p.speed.preset), CRF \(Int(p.quality.crf)) (max \(p.quality.maxMbps) Mb/s) · \(Fmt.int(done)) frames in \(Fmt.hm(Date().timeIntervalSince(started))) · HDR10 \(p.mastering.text), MaxCLL \(p.maxCLL), MaxFALL \(p.maxFALL)")
-
-        // 3. HDR10+ (SEI) and Dolby Vision (RPU NAL units) go into the stream, frame by frame
-        var current = base
-        if let j = p.hdr10plus, let tool = Tools.hdr10plusTool {
-            stage("Adding the HDR10+ metadata…", 0.5)
-            let next = tmp.appendingPathComponent("video.hdr10plus.hevc")
-            let r = Tools.runAll(tool, ["inject", "-i", current.path, "-j", j.path, "-o", next.path])
-            log(r.text)
-            guard r.status == 0, fm.fileExists(atPath: next.path) else { throw AppError("hdr10plus_tool couldn't add the HDR10+ metadata. See the log.") }
-            try? fm.removeItem(at: current); current = next
-            notes.append("HDR10+ metadata added from \(j.lastPathComponent)")
-        }
-        if cancel.isSet { throw Cancelled() }
-        if let rpu, let tool = Tools.doviTool {
-            stage("Adding the Dolby Vision metadata…", 0.8)
-            let next = tmp.appendingPathComponent("video.dv.hevc")
-            let r = Tools.runAll(tool, ["inject-rpu", "-i", current.path, "--rpu-in", rpu.path, "-o", next.path])
-            log(r.text)
-            guard r.status == 0, fm.fileExists(atPath: next.path) else { throw AppError("dovi_tool couldn't add the Dolby Vision metadata. See the log.") }
-            try? fm.removeItem(at: current); current = next
-        }
-        return (current, rpu, notes)
-    }
-
-    /// The final file's picture as an Annex-B HEVC stream, piped into a tool (dovi_tool / hdr10plus_tool reading "-")
-    static func pipeVideo(_ file: URL, into exe: String, _ args: [String], cancel: CancelFlag) -> (status: Int32, text: String) {
-        guard let ffmpeg = Tools.ffmpeg else { return (-1, "ffmpeg not found") }
-        let ff = Process(), tool = Process()
-        ff.executableURL = URL(fileURLWithPath: ffmpeg)
-        ff.arguments = ["-nostdin", "-v", "error", "-i", file.path, "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "hevc_mp4toannexb", "-f", "hevc", "-"]
-        tool.executableURL = URL(fileURLWithPath: exe)
-        tool.arguments = args
-        let video = Pipe(), out = Pipe()
-        ff.standardInput = FileHandle.nullDevice; ff.standardOutput = video; ff.standardError = FileHandle.nullDevice
-        tool.standardInput = video; tool.standardOutput = out; tool.standardError = out
-        let lock = NSLock()
-        var text = Data()
-        out.fileHandleForReading.readabilityHandler = { h in let d = h.availableData; lock.lock(); text.append(d); lock.unlock() }
-        do { try tool.run(); try ff.run() } catch {
-            out.fileHandleForReading.readabilityHandler = nil
-            return (-1, error.localizedDescription)
-        }
-        try? video.fileHandleForWriting.close(); try? video.fileHandleForReading.close()   // only the children keep the pipe
-        while ff.isRunning || tool.isRunning {
-            if cancel.isSet { if ff.isRunning { ff.terminate() }; if tool.isRunning { tool.terminate() } }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-        out.fileHandleForReading.readabilityHandler = nil
-        let rest = out.fileHandleForReading.readDataToEndOfFile()
-        lock.lock(); text.append(rest); lock.unlock()
-        let ok = ff.terminationStatus == 0 && tool.terminationStatus == 0 && !cancel.isSet
-        return (ok ? 0 : max(ff.terminationStatus, tool.terminationStatus, 1), String(decoding: text, as: UTF8.self))
-    }
-
-    static func md5(_ u: URL) -> String? {
-        guard let d = try? Data(contentsOf: u, options: .alwaysMapped) else { return nil }
-        return Insecure.MD5.hash(data: d).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// Checks the encoded picture in the final file: frame count and signalling (MediaInfo), then the metadata itself,
-    /// read back frame by frame — the Dolby Vision RPU must be byte-identical to the one generated, HDR10+ in every frame.
-    static func verify(_ out: URL, plan: VideoEncodePlan, rpu: URL?, tmp: URL, cancel: CancelFlag,
-                       stage: (String, Double) -> Void) -> (ok: Bool, lines: [String]) {
-        guard let v = MediaInfo.tracks(out).first(where: { $0.type == "Video" }) else { return (false, ["⚠ Video track not found in the final file ✗"]) }
-        var ok = true, lines: [String] = []
-        let hdr = v["HDR_Format"] ?? ""
-        let frames = Int(v["FrameCount"] ?? "") ?? -1
-        lines.append("Picture: HEVC \(v["Format_Profile"] ?? "") · \(Fmt.int(frames)) frames (expected \(Fmt.int(plan.frames))) \(frames == plan.frames ? "✓" : "✗")")
-        if frames != plan.frames { ok = false }
-        func flag(_ name: String, _ present: Bool) {
-            lines.append("\(name): \(present ? "signalled" : "MISSING") \(present ? "✓" : "✗")")
-            if !present { ok = false }
-        }
-        flag("HDR10 (BT.2020 · PQ · SMPTE ST 2086 mastering + MaxCLL/MaxFALL)", hdr.contains("2086"))
-        if plan.dolbyVision != nil { flag("Dolby Vision 8.1 (HDR10-compatible)", hdr.contains("Dolby Vision")) }
-        if plan.hdr10plus != nil { flag("HDR10+ (SMPTE ST 2094-40)", hdr.contains("2094")) }
-        if let rpu, let tool = Tools.doviTool, !cancel.isSet {
-            stage("Reading the Dolby Vision metadata back from the final file…", 0.5)
-            let back = tmp.appendingPathComponent("readback.rpu")
-            let r = pipeVideo(out, into: tool, ["extract-rpu", "-", "-o", back.path], cancel: cancel)
-            let same = r.status == 0 && md5(back) != nil && md5(back) == md5(rpu)
-            let s = DolbyVisionMeta.summary(back)
-            lines.append(same ? "Dolby Vision metadata read back from the file: identical to the generated RPU, all \(Fmt.int(s?.frames ?? 0)) frames (\(Fmt.int(s?.shots ?? 0)) shots) ✓"
-                              : "Dolby Vision metadata read back from the file: DIFFERENT from the generated RPU ✗")
-            if !same { ok = false }
-            try? FileManager.default.removeItem(at: back)
-        }
-        if let json = plan.hdr10plus, let tool = Tools.hdr10plusTool, !cancel.isSet {
-            stage("Reading the HDR10+ metadata back from the final file…", 0.8)
-            let back = tmp.appendingPathComponent("readback.hdr10plus.json")
-            let r = pipeVideo(out, into: tool, ["extract", "-", "-o", back.path], cancel: cancel)
-            let n = r.status == 0 ? HDR10Plus.frames(back) : nil
-            lines.append("HDR10+ metadata read back from the file: \(n.map { Fmt.int($0) } ?? "none") of \(Fmt.int(plan.frames)) frames (from \(json.lastPathComponent)) \(n == plan.frames ? "✓" : "✗")")
-            if n != plan.frames { ok = false }
-            try? FileManager.default.removeItem(at: back)
-        }
-        return (ok, lines)
-    }
-}
+// MARK: - Encoding: see Transcode.swift (TranscodePlan, Transcode.encodeElementary / verifyElementary)
 
 // MARK: - Interface
 
@@ -887,7 +667,7 @@ struct HDRPanel: View {
         let v = project.videoTrack
         let frames = project.videoFrames
         Section {
-            Toggle("Encode the picture for playback", isOn: $hdr.encode)
+            Toggle("Encode the picture for playback", isOn: Binding(get: { hdr.encode }, set: { hdr.encode = $0; hdr.autoEnabledBy = nil; hdr.autoReason = nil; hdr.bannerCollapsed = false }))
                 .toggleStyle(.switch).disabled(project.busy)
             if let imf = hdr.imf {
                 LabeledContent("IMF") {
@@ -937,6 +717,8 @@ struct HDRPanel: View {
                 if let plan = project.encodePlan {
                     Label("Output: \(plan.formats) · ~\(Fmt.bytes(plan.estimatedBytes)) of picture · about \(Fmt.hm(plan.estimatedSeconds)) of encoding on this Mac (rough; it can run overnight — the Mac won't sleep)",
                           systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                    Label("Colour: \(plan.outputColor.text)" + (plan.source.color.isComplete ? " — read from the source and repeated in the output" : " — primaries/transfer missing in the source; BT.2020 / PQ assumed"),
+                          systemImage: "paintpalette").font(.caption).foregroundStyle(plan.source.color.isComplete ? Color.secondary : Color.orange)
                 } else if v == nil {
                     Label("Add the picture (IMF package, or an HDR ProRes/MXF file).", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
                 }
@@ -967,8 +749,8 @@ struct PlaybackPanel: View {
     var body: some View {
         let audio = project.included.filter { $0.kind == .audio }
         let hdr = project.videoTrack?.mi?["HDR_Format"] ?? ""
-        PlaybackRows(dolbyVision: project.encodePlan?.dolbyVision != nil || hdr.contains("Dolby Vision"),
-                     hdr10plus: project.encodePlan?.hdr10plus != nil || hdr.contains("2094"),
+        PlaybackRows(dolbyVision: project.encodePlan?.hdr?.dolbyVision != nil || hdr.contains("Dolby Vision"),
+                     hdr10plus: project.encodePlan?.hdr?.hdr10plus != nil || hdr.contains("2094"),
                      atmosDDP: audio.contains { $0.codecKey == "eac3" && $0.isAtmos },
                      trueHD: audio.contains { $0.codecKey == "truehd" || $0.codecKey == "mlp" },
                      mkv: project.container == .mkv)

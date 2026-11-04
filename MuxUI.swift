@@ -20,6 +20,7 @@ struct ContentView: View {
             Group {
                 switch project.mode {
                 case .mux: MuxContent(targeted: dropTargeted)
+                case .transcode: TranscodeView(targeted: dropTargeted)
                 case .inspect: InspectorView(targeted: dropTargeted)
                 case .atmos: AtmosView(targeted: dropTargeted)
                 case .qc: RenderQCView(targeted: dropTargeted)
@@ -33,6 +34,7 @@ struct ContentView: View {
                 Group {
                     switch project.mode {
                     case .mux: MuxInspector()
+                    case .transcode: TranscodeInspector()
                     case .atmos: AtmosInspector()
                     case .qc: RenderQCInspector()
                     case .inspect: EmptyView()
@@ -56,6 +58,7 @@ struct ContentView: View {
     var subtitle: String {
         switch project.mode {
         case .mux: return project.outputURL?.lastPathComponent ?? "Abdala Brothers"
+        case .transcode: return TranscodeModel.shared.selected?.output.lastPathComponent ?? "Abdala Brothers"
         case .inspect: return project.inspector.url?.lastPathComponent ?? "Abdala Brothers"
         case .atmos: return project.atmos.url?.lastPathComponent ?? "Abdala Brothers"
         case .qc: return RenderQCModel.shared.url?.lastPathComponent ?? "Abdala Brothers"
@@ -93,13 +96,18 @@ struct ModeToolbar: ToolbarContent {
 
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
-            Button { if project.mode == .qc { RenderQCModel.shared.pick() } else { project.openPanel() } } label: { Label(project.mode == .mux ? "Add Files" : "Open File", systemImage: "plus") }
-                .help(project.mode == .mux ? "Add files (⌘O)" : "Open a file (⌘O)")
-                .disabled(project.mode == .mux && project.busy)
+            Button { if project.mode == .qc { RenderQCModel.shared.pick() } else { project.openPanel() } } label: { Label(project.mode == .mux || project.mode == .transcode ? "Add Files" : "Open File", systemImage: "plus") }
+                .help(project.mode == .mux || project.mode == .transcode ? "Add files (⌘O)" : "Open a file (⌘O)")
+                .disabled((project.mode == .mux && project.busy) || (project.mode == .transcode && TranscodeModel.shared.busy))
             if project.mode == .mux {
                 Button { project.clear() } label: { Label("Clear All", systemImage: "trash") }
                     .help("Start over (⌘N)")
                     .disabled(project.tracks.isEmpty || project.busy)
+            }
+            if project.mode == .transcode {
+                Button { TranscodeModel.shared.clear() } label: { Label("Clear All", systemImage: "trash") }
+                    .help("Empty the queue")
+                    .disabled(TranscodeModel.shared.items.isEmpty || TranscodeModel.shared.busy)
             }
         }
         ToolbarItemGroup(placement: .primaryAction) {
@@ -109,11 +117,26 @@ struct ModeToolbar: ToolbarContent {
                     ProgressView().controlSize(.small)
                     Button("Cancel", role: .cancel) { project.cancel() }
                 } else {
-                    Button { project.run() } label: { Text(project.hdr.encode ? "Encode & Mux" : "Mux").padding(.horizontal, 6) }
+                    Button { project.run() } label: { Text(project.hdr.encode ? "Re-encode & Mux" : "Mux").padding(.horizontal, 6) }
                         .buttonStyle(.borderedProminent)
+                        .tint(project.hdr.encode ? .orange : .accentColor)
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(!project.canRun)
-                        .help("Create the final file (⌘↩)")
+                        .help(project.hdr.encode ? "Re-encode the picture (HEVC 10-bit) and mux (⌘↩)" : "Create the final file (⌘↩)")
+                }
+            case .transcode:
+                let m = TranscodeModel.shared
+                if m.running {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel", role: .cancel) { m.cancel() }
+                } else {
+                    let n = m.pending.count
+                    Button { m.start() } label: { Text(n > 1 ? "Transcode \(n) files" : "Transcode").padding(.horizontal, 6) }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(!m.canRun)
+                        .help("Write the new file(s) — the originals are never touched (⌘↩)")
                 }
             case .inspect:
                 Button { project.inspector.saveReport() } label: { Label("Save Report…", systemImage: "square.and.arrow.down") }
@@ -145,6 +168,8 @@ struct MuxContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            TabStrip.mux
+            if project.hdr.encode { ReencodeBanner() }
             if project.tracks.isEmpty && project.loadingCount == 0 {
                 NoticeStack(hasResult: hasResult)
                     .padding(.horizontal, DS.margin).padding(.top, DS.gap)
@@ -350,6 +375,10 @@ struct TrackRow: View {
                 Text(track.codecName).font(.headline)
                 ForEach(Array(track.badges.enumerated()), id: \.offset) { _, b in Chip(text: b) }
                 if isReference { Chip(text: "Sync reference", tint: .accentColor) }
+                if track.kind == .video {
+                    Chip(text: project.hdr.encode ? "RE-ENCODE → HEVC 10-bit" : "COPY · bit-exact", tint: project.hdr.encode ? .orange : nil)
+                        .help(project.hdr.encode ? "The picture is re-encoded (the Mux tab's one exception, for Dolby Vision / HDR10+)" : "The picture is copied bit for bit")
+                }
             }
             if !track.details.isEmpty { Text(track.details).font(.subheadline).foregroundStyle(.secondary) }
             Text("\(track.url.lastPathComponent) · \(track.imfSegments.isEmpty ? track.sourceLabel : "IMF picture")")
@@ -875,7 +904,7 @@ struct SummarySections: View {
             if video != nil, let e = project.encodePlan {
                 KeyValueRow(label: "Video", value: "HEVC Main 10 · \(e.width)×\(e.height) · \(Probe.fps("\(e.fps.num)/\(e.fps.den)") ?? "") fps · 10-bit 4:2:0 · \(e.formats)",
                             chip: "Re-encoded for playback", chipTint: .orange)
-                KeyValueRow(label: "Color tags", value: "BT.2020 / PQ / BT.2020 · HDR10 \(e.mastering.text)")
+                KeyValueRow(label: "Color tags", value: e.outputColor.text + (e.hdr.map { " · HDR10 \($0.mastering.text)" } ?? ""))
             } else if let v = video {
                 KeyValueRow(label: "Video", value: videoLine(v), chip: "Identical (no re-encode)", chipTint: .green)
                 KeyValueRow(label: "Color tags", value: colorLine(v))

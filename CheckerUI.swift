@@ -77,6 +77,16 @@ struct InspectorView: View {
             }
             ZidooSeal(level: insp.data.zidooLevel, caption: "Read from this file · " + Zidoo.caveat)
                 .padding(.vertical, 4)
+            if let codec = insp.data.checks.first(where: { $0.title == "Video codec" }), codec.level != .ok, let u = insp.url {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Label("The picture isn't what the Academy asks for (\(codec.detail)).", systemImage: codec.level.icon).foregroundStyle(codec.level.color).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Fix → Transcode to ProRes 422 HQ") { TranscodeModel.shared.open(u, preset: .prores422HQ); project.mode = .transcode }
+                        .tint(.orange).buttonStyle(.borderedProminent)
+                        .help("Opens the Transcode tab with this file and the Academy preset (a new file is written; this one isn't touched)")
+                }
+                .padding(.vertical, 4)
+            }
         }
     }
 

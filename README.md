@@ -4,7 +4,11 @@ Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App 
 
 ## O que ele faz
 
-- **Mux sem perda** de vídeo + áudios (PCM, Dolby Digital Plus JOC/Atmos, TrueHD) em MOV/MP4 com os átomos de canal e Dolby corretos para QuickTime, Resolve e a Academia; MKV sem perda para home theater.
+- **Mux sem perda** de vídeo + áudios (PCM, Dolby Digital Plus JOC/Atmos, TrueHD) em MOV/MP4 com os átomos de canal e Dolby corretos para QuickTime, Resolve e a Academia; MKV sem perda para home theater. Nada é recodificado nessa aba; a única exceção, anunciada com banner, é a versão de playback HEVC com Dolby Vision / HDR10+.
+- **Aba Transcode** (v1.6): o único lugar do app onde a imagem é recodificada. Faixa fixa no topo dizendo isso, fila de arquivos e o cartão Fonte → Destino (o que muda em laranja, o que é preservado em cinza). Presets ProRes 422 HQ — Academy, ProRes 422, H.264 — review copy, HEVC SDR e HEVC Dolby Vision; ProRes pelo encoder da Apple (VideoToolbox, o hardware dos chips M; `prores_ks` só como alternativa), H.264 `libx264`, HEVC `libx265`, VideoToolbox no modo Draft; resolução Same/UHD/HD; áudio copiado bit a bit, PCM ou AAC; MOV/MP4/MKV. Avisos de alfa descartado, 4:4:4 → 4:2:2, 10 → 8 bits e HDR → H.264 (tone mapping com zscale+tonemap quando o ffmpeg tiver o filtro; senão avisa e bloqueia). Preserva frame rate racional, timecode, aspecto de pixel e layout de canais. No fim confere frames, duração, cor e timecode contra a fonte, roda o Render QC no resultado, mede VMAF (opcional, se houver libvmaf) e dá os selos da Academia e do Zidoo. O original nunca é tocado; sai sempre um arquivo novo.
+- **Mux, clareza** (v1.6): faixa fixa "nothing is re-encoded" no topo; quando o Dolby Vision ou o HDR10+ ligam a recodificação sozinhos, um banner laranja diz qual arquivo ligou, por quê, e mostra fonte → destino (codec, bits, chroma, bitrate), com "Got it" (encolhe, nunca some) e "Don't re-encode"; etiqueta COPY · bit-exact / RE-ENCODE → HEVC 10-bit na linha do vídeo; botão "Re-encode & Mux"; confirmação antes de começar com o tempo estimado; linha "Picture: RE-ENCODED (A → B)" ou "Picture: bit-exact copy" no resultado e no relatório.
+- **Cor da fonte preservada** (v1.6): o encode HEVC lê primárias, transferência, matriz e range da fonte e repete na saída, em vez de gravar BT.2020/PQ sempre (achado 2.8 da revisão de código); para o 2DIE4 (PQ/BT.2020) o comando do ffmpeg/x265 é idêntico ao da v1.5.
+- **File Checker** (v1.6): quando o codec reprova (4444, HEVC…), o botão "Fix → Transcode to ProRes 422 HQ" abre a aba Transcode com o arquivo e o preset já escolhidos.
 - **Vários monos = um som só** (v1.6): WAVs mono (um por canal) ou os streams mono que o Resolve grava dentro do MOV ProRes viram UMA faixa multicanal (estéreo, LCR, 5.0, 5.1, 7.1). Quem é quem vem dos rótulos de canal gravados nos arquivos, depois dos nomes (`.L.wav`, `_LFE`, `Ls`, `Lss`, `Rsr`…) e, se nada disser, da escuta do ChannelID em segundo plano; a folha "Channels…" mostra cada arquivo por canal, deixa corrigir, escolher a ordem de saída (SMPTE L R C LFE Ls Rs por padrão) ou desagrupar. O Align, o Sync Viewer e o Picture Check tratam o grupo como uma faixa (a referência é a soma dos canais sem o LFE) e um único offset corta os mesmos samples inteiros em todos os canais. No mux os monos são intercalados num WAV temporário sem recompressão, entram no MP4Box como uma faixa com os rótulos de canal, e a verificação bit a bit desintercala a faixa final e confere cada canal contra o mono de origem. Um 5.1 dentro do vídeo deixa de virar referência de sync automaticamente (é entrega, não guia); só um guia estéreo/mono vira.
 - **Apple Silicon** (v1.5): o app é compilado só para arm64 — não existe fatia Intel, de propósito, então o macOS nunca o executa via Rosetta (era isso que disparava o aviso "Support Ending for Intel-based Apps" do macOS 26). Requer um Mac com Apple Silicon (M1 ou mais novo).
 - **Zidoo** (v1.5): o File Checker e o resultado do mux dizem se o arquivo toca no Zidoo da sala de projeção (container, vídeo e áudio contra as especificações publicadas pela Zidoo), com selo e ressalva; no Mux o selo é previsto a partir das fontes antes de muxar, e o relatório em texto ganha a seção ZIDOO PLAYBACK.
@@ -62,7 +66,11 @@ O binário dentro do app aceita alguns comandos sem interface:
 /Applications/BROS-MUX.app/Contents/MacOS/BROS-MUX --channels MIX.wav --target "L C R Ls Rs LFE" --out MIX_film.wav
 ```
 
-`--qc` roda o Render QC; `--picture` roda o Picture Sync Check; `--channels` identifica os canais de um WAV e, com `--target`/`--out`, grava uma cópia reordenada; no `--job`, `--channel-order "L C R Ls Rs LFE"` reordena as faixas PCM durante o mux; `--snapshot --welcome -o tela.png` tira uma captura da tela inicial.
+```bash
+/Applications/BROS-MUX.app/Contents/MacOS/BROS-MUX --transcode MASTER.mov --to prores422hq --out MASTER_422HQ.mov
+```
+
+`--transcode IN --to prores422hq|prores422|h264|hevc|hevcdv [--res hd|uhd] [--tonemap] [--quality …] [--speed …] [--audio copy|pcm|aac|none] [--mov|--mp4|--mkv] [--dv XML] [--hdr10plus JSON] [--no-qc] [--vmaf] --out OUT` recodifica um arquivo pela aba Transcode (imprime o que muda, os avisos, o comando, o resultado e os selos); `--qc` roda o Render QC; `--picture` roda o Picture Sync Check; `--channels` identifica os canais de um WAV e, com `--target`/`--out`, grava uma cópia reordenada; no `--job`, `--channel-order "L C R Ls Rs LFE"` reordena as faixas PCM durante o mux; `--snapshot --welcome -o tela.png` tira uma captura da tela inicial.
 
 ## Arquivos
 
@@ -74,7 +82,8 @@ O binário dentro do app aceita alguns comandos sem interface:
 | `ChannelID.swift`, `ChannelOrderUI.swift` | identificação e reordenação de canais PCM |
 | `MonoGroup.swift` | vários monos (WAVs ou streams do MOV) como uma faixa multicanal: detecção, intercalação, verificação canal a canal |
 | `RenderQCEngine.swift`, `RenderQC.swift` | motor e aba do Render QC |
-| `HDR.swift` | Dolby Vision / HDR10+ |
+| `Transcode.swift`, `TranscodeUI.swift` | motor de transcode (TranscodePlan, argumentos do ffmpeg, runner, presets, CLI) e a aba Transcode + o banner de re-encode do Mux |
+| `HDR.swift` | Dolby Vision / HDR10+ (HDRSettings, metadados, painel) |
 | `AtmosDecoder.swift`, `AtmosOAMD.swift`, `AtmosViz.swift` | metadados Atmos e visualizador 3D |
 | `Monitor.swift`, `Welcome.swift` | monitor de sistema e tela inicial |
 | `CHANGELOG.md` | o que cada versão adicionou, mudou e corrigiu |

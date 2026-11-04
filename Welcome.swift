@@ -23,7 +23,7 @@ final class EngineStatus {
     var engines: [Engine] {
         [
             Engine(id: "mp4box", name: "MP4Box (GPAC)", role: "Writes the MOV / MP4: every track copied bit for bit, nothing re-encoded. BROS-MUX then fixes the channel and Dolby atoms itself.", symbol: "shippingbox", color: .indigo, path: Tools.mp4box, install: "brew install gpac"),
-            Engine(id: "ffmpeg", name: "FFmpeg", role: "Decodes audio and picture for the waveform sync, the Picture check and Render QC; lossless MKV copies; the HEVC/x265 encode of the HDR playback versions.", symbol: "film.stack", color: .green, path: Tools.ffmpeg, install: "brew install ffmpeg"),
+            Engine(id: "ffmpeg", name: "FFmpeg", role: "Decodes audio and picture for the waveform sync, the Picture check and Render QC; lossless MKV copies; the Transcode tab (ProRes through Apple's VideoToolbox, H.264 x264, HEVC x265) and the HEVC encode of the HDR playback versions.", symbol: "film.stack", color: .green, path: Tools.ffmpeg, install: "brew install ffmpeg"),
             Engine(id: "ffprobe", name: "FFprobe", role: "Reads streams, codecs, timestamps and frame counts of every file.", symbol: "doc.text.magnifyingglass", color: .teal, path: Tools.ffprobe, install: "brew install ffmpeg"),
             Engine(id: "mediainfo", name: "MediaInfo", role: "Profiles, bit depths, colour tags and Dolby details for the File Checker and the Academy specs.", symbol: "info.circle", color: .blue, path: Tools.mediainfo, install: "brew install media-info"),
             Engine(id: "dovi", name: "dovi_tool", role: "Dolby Vision: rebuilds the RPU from the IMF metadata and injects it into the HEVC stream.", symbol: "sparkles.tv", color: .purple, path: Tools.doviTool, install: "brew install dovi_tool"),
