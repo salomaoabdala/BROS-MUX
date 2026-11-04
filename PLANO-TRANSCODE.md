@@ -43,18 +43,21 @@ O nome certo é **Transcode**: decodificar e codificar de novo em outro codec ou
 - Uma faixa fixa no topo da aba diz: **"Mux · nada é recomprimido. Imagem e som entram e saem bit a bit; as faixas só são juntadas num arquivo."**
 - **Não ganha** nenhum controle de transcode: nada de seletor de codec, de mudança de resolução, de qualidade ou de cor.
 - Fica o caminho para o Transcode: quando o File Checker reprova um arquivo, o botão "Corrigir" **leva para a aba Transcode**. Ele não converte nada dentro do Mux.
-- **Única exceção: Dolby Vision e HDR10+.** Embutir o RPU do Dolby Vision exige recodificar a imagem, e o fluxo automático (soltar o XML e o app já preparar a versão de playback) é bom e fica. Só que, quando isso acontece, o app tem que **deixar a mudança impossível de não ver** (detalhes abaixo).
+- **Única exceção: Dolby Vision e HDR10+.** Embutir o RPU do Dolby Vision exige recodificar a imagem. **Decisão: continua ligando no automático, como hoje** (soltar o XML de Dolby Vision ou o JSON de HDR10+ já prepara a versão de playback). Só que, quando isso acontece, o app tem que **avisar que ligou sozinho, dizer por quê e dizer exatamente o que vai fazer** (detalhes abaixo).
 
 #### O alerta de transcode dentro do Mux (caso Dolby Vision)
 
-Quando o `hdr.encode` liga, seja sozinho (ao soltar o XML) ou na mão:
+Quando o `hdr.encode` liga, seja sozinho (ao soltar o XML) ou na mão (os textos abaixo estão em português só para o plano; no app saem em inglês, como o resto da interface):
 
-1. **Um banner laranja grande no topo da aba**, por cima da faixa "nada é recomprimido", mostrando a fonte e o destino lado a lado:
+1. **Um banner laranja grande no topo da aba**, por cima da faixa "nada é recomprimido". Ele diz **o que ligou a recodificação** e mostra a fonte e o destino lado a lado:
 
-   > ⚠️ **A imagem vai ser recodificada**
+   > ⚠️ **Recodificação ligada automaticamente**
+   > Você adicionou **DolbyVision_2DIE4.xml** (metadados Dolby Vision). Para embutir o Dolby Vision, a imagem precisa virar HEVC 10-bit, então o BROS-MUX ligou a recodificação sozinho.
    > **ProRes 4444 · 12-bit · 4:4:4 · 1,2 Gb/s** → **HEVC Main 10 · 10-bit · 4:2:0 · ~60 Mb/s**
-   > Dolby Vision 8.1 exige HEVC 10-bit. O áudio continua bit a bit.
-   > [Não recodificar (tirar o Dolby Vision)]
+   > Dolby Vision 8.1 + HDR10. O áudio continua bit a bit.
+   > [Entendi] [Não recodificar (tirar o Dolby Vision)]
+
+   Se foi o usuário que ligou na mão, o título muda para "Recodificação ligada" e a frase do motivo some. O banner continua visível enquanto a recodificação estiver ligada. "Entendi" só o deixa mais compacto, numa linha só, e ele nunca desaparece.
 
 2. **Na linha do vídeo**, a etiqueta muda de `COPY · bit a bit` (cinza) para **`RECODIFICA → HEVC 10-bit`** (laranja).
 3. **O botão principal** muda de "Mux" para **"Recodificar e Mux"**, em laranja.
@@ -144,25 +147,42 @@ BROS-MUX --transcode IN.mov --to prores422hq --out OUT.mov
 
 No mesmo estilo de `--qc`, `--picture` e `--channels`.
 
-## 6. Em que ordem lançar
+## 6. Entrega: uma atualização só (v1.6)
 
-- **v1.6: deixar o que já existe claro (antes de qualquer função nova)**
-  - frase fixa no topo da aba Mux ("nada é recomprimido…");
-  - o alerta completo do caso Dolby Vision: banner fonte → destino, etiqueta na linha do vídeo, botão "Recodificar e Mux", confirmação na primeira vez e a linha no relatório;
-  - corrigir a cor fixa no código.
-- **v1.7: aba Transcode**
-  - criar o `TranscodePlan`, com o HEVC Dolby Vision migrado para dentro dele;
-  - aba Transcode com a frase fixa no topo e o cartão Fonte → Destino;
-  - um arquivo por vez: ProRes 422 / 422 HQ, H.264 SDR e HEVC, com áudio copiado e verificação no final;
-  - botão "Corrigir → Transcode para 422 HQ" no File Checker, que abre a aba Transcode com o preset certo já escolhido.
-- **v1.8: mais funções, só na aba Transcode**
-  - fila de vários arquivos;
-  - tone mapping HDR → SDR para H.264;
-  - mudança de resolução (UHD → HD) e VMAF.
+Tudo sai numa única versão, a **v1.6**, com estas mudanças:
+
+**Aba Mux (clareza)**
+1. Frase fixa no topo: "Mux · nada é recomprimido. Imagem e som entram e saem bit a bit; as faixas só são juntadas num arquivo."
+2. Recodificação automática do Dolby Vision e do HDR10+ mantida, agora com:
+   - o banner "Recodificação ligada automaticamente", que diz qual arquivo a ligou e mostra a fonte e o destino;
+   - a etiqueta `COPY · bit a bit` / `RECODIFICA → HEVC 10-bit` na linha do vídeo;
+   - o botão "Recodificar e Mux";
+   - a confirmação antes de começar;
+   - a linha "Imagem: RECODIFICADA / cópia bit a bit" no relatório.
+
+**Aba Transcode (nova)**
+3. Aba própria, com a frase fixa no topo e o cartão Fonte → Destino.
+4. Destinos: ProRes (Proxy, LT, 422, 422 HQ, 4444, 4444 XQ, pelo encoder da Apple), H.264 (`libx264`) e HEVC (`libx265`), com Qualidade e Velocidade. O VideoToolbox entra no modo rascunho.
+5. Áudio copiado por padrão; PCM em MOV, ou AAC quando o container exige.
+6. Mudança de resolução (UHD → HD) e de bit depth.
+7. Tone mapping HDR → SDR/Rec.709 quando o destino é H.264 e a fonte é HDR, com aviso.
+8. Avisos de canal alfa descartado, 4:4:4 → 4:2:2 e 10 → 8 bits.
+9. Fila de vários arquivos.
+10. Verificação no final: frames, duração, cor e timecode, Render QC automático, selo da Academia ou do Zidoo e VMAF opcional.
+11. Linha de comando: `--transcode IN --to <preset> --out OUT`.
+
+**File Checker**
+12. O botão "Corrigir → Transcode para 422 HQ" abre a aba Transcode com o preset já escolhido.
+
+**Por trás**
+13. Correção da cor fixa no código: o encoder repete a cor da fonte, em vez de gravar BT.2020/PQ sempre.
+14. O `VideoEncodePlan` vira o `TranscodePlan`, um motor só usado pelas duas abas.
+
+**Documentação**
+15. A entrada da v1.6 no `CHANGELOG.md` lista cada item acima, e o README ganha a seção da aba Transcode.
 
 ## Perguntas em aberto
 
 - O nome da aba fica "Transcode" ou "Convert"?
 - O encoder de ProRes padrão é o da Apple (VideoToolbox/AVFoundation) e o `prores_ks` só entra como alternativa?
 - Os chips M de entrada (sem hardware de ProRes) devem ganhar um aviso de que vai demorar mais?
-- O Dolby Vision deve continuar ligando sozinho no Mux (com o alerta), ou deve mandar o usuário para a aba Transcode? Hoje a escolha é manter no Mux.
