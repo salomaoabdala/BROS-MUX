@@ -338,7 +338,13 @@ struct TranscodeInspector: View {
                         Text(plan.outputColor.text).multilineTextAlignment(.trailing).font(.callout)
                             .foregroundStyle(plan.color == .toneMapToSDR ? Color.orange : Color.primary)
                     }
-                    Text(plan.source.color.isTagged ? "Read from the source and repeated in the output." : "The source carries no colour tags.").font(.caption).foregroundStyle(.secondary)
+                    Text(plan.colourNote ?? (plan.source.color.isTagged ? "Read from the source and repeated in the output." : "The source carries no colour tags.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    // a master that isn't BT.2020 going to HDR: the app says so and recommends the conversion
+                    if let from = plan.gamutConversion ?? (plan.gamutWarning != nil ? plan.source.color.primaries : nil) {
+                        Toggle(isOn: Binding(get: { m.hdr.convertGamut }, set: { m.hdr.convertGamut = $0 })) { Text("Convert \(ColorLUT.label(from)) → BT.2020 (recommended)") }.disabled(m.busy)
+                        Text(plan.gamutWarning ?? "HDR10 and Dolby Vision streams are BT.2020: the picture is converted in linear light; the colours don't change.")
+                            .font(.caption).foregroundStyle(plan.gamutWarning == nil ? Color.secondary : Color.orange).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             } header: {
                 Text("Picture")

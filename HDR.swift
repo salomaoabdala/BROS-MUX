@@ -614,6 +614,7 @@ final class HDRSettings {
     var customMbps = 100
     var customMaxMbps = 160
     var qualityFloor = true
+    var convertGamut = true              // a P3-D65 / BT.709 master is carried in BT.2020 (HDR10 / Dolby Vision); off = tagged as it came
     /// The bitrate control the next encode uses
     var rate: Rate {
         let t = max(bitratePreset == .custom ? customMbps : bitratePreset.mbps, 1)
@@ -801,8 +802,15 @@ struct HDRPanel: View {
                 if let plan = project.encodePlan {
                     Label("Output: \(plan.formats) · ~\(Fmt.bytes(plan.estimatedBytes)) of picture · about \(Fmt.hm(plan.estimatedSeconds)) of encoding on this Mac (rough; it can run overnight — the Mac won't sleep)",
                           systemImage: "clock").font(.caption).foregroundStyle(.secondary)
-                    Label("Colour: \(plan.outputColor.text)" + (plan.source.color.isComplete ? " — read from the source and repeated in the output" : " — primaries/transfer missing in the source; BT.2020 / PQ assumed"),
+                    Label("Colour: \(plan.outputColor.text)" + (plan.colourNote.map { " — \($0)" } ?? (plan.source.color.isComplete ? " — read from the source and repeated in the output" : " — primaries/transfer missing in the source; BT.2020 / PQ assumed")),
                           systemImage: "paintpalette").font(.caption).foregroundStyle(plan.source.color.isComplete ? Color.secondary : Color.orange)
+                    // a master that isn't BT.2020: the app says so and recommends the conversion, never converts (or skips) in silence
+                    if let from = plan.gamutConversion ?? (plan.gamutWarning != nil ? plan.source.color.primaries : nil) {
+                        Toggle(isOn: $hdr.convertGamut) { Text("Convert \(ColorLUT.label(from)) → BT.2020 (recommended)") }.disabled(project.busy)
+                        Label(plan.gamutWarning ?? "The source is \(ColorLUT.label(from)). HDR10 and Dolby Vision streams are BT.2020: the picture is converted in linear light, the matrix becomes BT.2020 and the chroma siting UHD. The colours don't change — BT.2020 is the container they travel in. The mastering display stays \(ColorLUT.label(from)).",
+                              systemImage: plan.gamutWarning == nil ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(plan.gamutWarning == nil ? Color.secondary : Color.orange).fixedSize(horizontal: false, vertical: true)
+                    }
                 } else if v == nil {
                     Label("Add the picture (IMF package, or an HDR ProRes/MXF file).", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
                 }

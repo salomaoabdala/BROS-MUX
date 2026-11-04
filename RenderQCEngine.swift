@@ -16,7 +16,7 @@ enum RenderQC {
              blackFrame = "Black frame", whiteFrame = "White frame", frozenFrame = "Repeated frame", bandArtifact = "Band / line artifact",
              blockArtifact = "Block artifact", timestampGap = "Timestamp gap", timestampDup = "Duplicate timestamp", avLength = "Audio/video length",
              audioDropout = "Audio dropout", audioClick = "Audio click", audioClipping = "Audio clipping", audioSilent = "Silent channel",
-             decodeError = "Decode problem", sync = "Sound vs picture"
+             decodeError = "Decode problem", sync = "Sound vs picture", colourTags = "Colour tags"
     }
     struct Finding: Identifiable {
         let id = UUID()
@@ -43,6 +43,7 @@ enum RenderQC {
     static let W = 320, H = 180, TX = 16, TY = 9
     struct Info {
         var width = 0, height = 0, fps = 24.0, frames = 0, duration = 0.0, codec = "", pixFmt = ""
+        var primaries = "", transfer = "", matrix = "", chromaLoc = ""      // ffprobe colour tags of the picture
         var audioStreams: [(index: Int, channels: Int, rate: Int, codec: String, duration: Double)] = []
         var videoIndex = 0
         var startTimecode: String? = nil
@@ -76,6 +77,8 @@ enum RenderQC {
                 info.videoIndex = idx
                 info.width = s["width"] as? Int ?? 0; info.height = s["height"] as? Int ?? 0
                 info.codec = s["codec_name"] as? String ?? ""; info.pixFmt = s["pix_fmt"] as? String ?? ""
+                info.primaries = s["color_primaries"] as? String ?? ""; info.transfer = s["color_transfer"] as? String ?? ""
+                info.matrix = s["color_space"] as? String ?? ""; info.chromaLoc = s["chroma_location"] as? String ?? ""
                 let r = (s["r_frame_rate"] as? String ?? "").split(separator: "/").compactMap { Double($0) }
                 if r.count == 2, r[1] > 0 { info.fps = r[0] / r[1] }
                 if let n = Int(s["nb_frames"] as? String ?? "") { info.frames = n }
@@ -579,6 +582,19 @@ enum RenderQC {
                                                               : "only \(f.count) of the \(info.frames) frames the container declares could be decoded"))
         }
         findings += pictureFindings(f, fps: info.fps)
+        // an HDR (PQ / HLG) stream is BT.2020 — primaries 9, matrix 9 — or players have to guess, and the guess shifts the hues
+        if info.transfer == "smpte2084" || info.transfer == "arib-std-b67" {
+            var bad: [String] = []
+            if info.primaries != "bt2020" { bad.append("primaries \(info.primaries.isEmpty ? "untagged" : info.primaries)") }
+            if info.matrix != "bt2020nc" && info.matrix != "bt2020c" { bad.append("matrix \(info.matrix.isEmpty ? "untagged" : info.matrix)") }
+            if !bad.isEmpty {
+                findings.append(Finding(kind: .colourTags, severity: .error, frame: 0, count: 0, time: 0,
+                                        detail: "HDR (\(info.transfer == "smpte2084" ? "PQ" : "HLG")) stream tagged \(bad.joined(separator: ", ")) — HDR10 and Dolby Vision expect BT.2020 / BT.2020 nc; a player that assumes BT.2020 shifts the hues. Re-encode with the BT.2020 conversion on."))
+            } else if info.codec == "hevc", info.width >= 3840, info.chromaLoc != "topleft" {
+                findings.append(Finding(kind: .colourTags, severity: .warning, frame: 0, count: 0, time: 0,
+                                        detail: "chroma siting \(info.chromaLoc.isEmpty ? "unspecified" : info.chromaLoc) — UHD HDR expects top-left (type 2)"))
+            }
+        }
         // confirm Media Offline cards by reading their text
         for (k, fd) in findings.enumerated() where fd.kind == .mediaOffline {
             let words = readText(url: url, index: info.videoIndex, frame: fd.frame, fps: info.fps).joined(separator: " ").lowercased()

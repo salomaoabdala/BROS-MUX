@@ -2422,6 +2422,7 @@ final class Project {
                         dvXML: dv == nil ? nil : hdr.dvXMLReady, hdr10plus: hdr.hdr10plus ? hdr.hdr10plusJSON : nil)
         p.container = container
         p.audio = .none          // the audio goes through the bit-exact mux path, never through ffmpeg
+        p.convertGamut = hdr.convertGamut
         return p
     }
     /// Problems with the HDR metadata that stop the job before any encoding
@@ -3186,6 +3187,7 @@ struct CLIArgs {
     var mbps: Int?                       // --mbps: the average (2pass) or the constant bitrate (cbr)
     var maxMbps: Int?                    // --max-mbps: the peak of the 2-pass encode
     var floor = true                     // --no-floor turns the quality floor off
+    var keepPrimaries = false            // --keep-source-primaries: no BT.2020 conversion of a P3-D65 / BT.709 master (tagged as it came)
     var refLateFrames = 0.0
     var channelOrder: String?            // "--channel-order \"L C R Ls Rs LFE\"": listen to each PCM track and write its channels in this order
     var pictureCheck = true
@@ -3223,6 +3225,7 @@ struct CLIArgs {
             case "--mbps": mbps = Int(next() ?? "")
             case "--max-mbps": maxMbps = Int(next() ?? "")
             case "--no-floor": floor = false
+            case "--keep-source-primaries": keepPrimaries = true
             case "--ref-late-frames": refLateFrames = Double(next() ?? "") ?? 0
             case "--channel-order": channelOrder = next()
             case "--no-picture-check": pictureCheck = false
@@ -3280,6 +3283,7 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
     }
     if let o = output { project.setOutput(URL(fileURLWithPath: o)) }
     if a.encode { project.hdr.encode = true }
+    if a.keepPrimaries { project.hdr.convertGamut = false }
     if let q = a.quality.flatMap({ HDRSettings.Quality(rawValue: $0) }) { project.hdr.quality = q }
     if let s = a.speed.flatMap({ HDRSettings.Speed(rawValue: $0) }) { project.hdr.speed = s }
     if let r = HDRSettings.Rate.fromCLI(mode: a.rate.flatMap(HDRSettings.RateMode.named), mbps: a.mbps, maxMbps: a.maxMbps, floor: a.floor) {
@@ -3361,7 +3365,7 @@ func runJobCLI(_ args: [String]) -> Int32 {
     let a = CLIArgs(args)
     // never fall back to a default destination from the command line — an explicit -o is required
     guard let o = a.output, ["mov", "mp4", "mkv"].contains((o as NSString).pathExtension.lowercased()) else {
-        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--align] [--no-source-audio] [--trim-ms N] [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft --rate crf|2pass|cbr --mbps N --max-mbps N --no-floor] (an explicit -o is required)"); return 2
+        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--align] [--no-source-audio] [--trim-ms N] [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft --rate crf|2pass|cbr --mbps N --max-mbps N --no-floor --keep-source-primaries] (an explicit -o is required)"); return 2
     }
     let project = buildProject(a, output: a.output)
     print("\nTRACKS:")
@@ -3373,7 +3377,7 @@ func runJobCLI(_ args: [String]) -> Int32 {
     if let l = project.predictedLevel { print("\nPREDICTED ACADEMY SEAL: \(l.emoji) \(l.title)") }
     guard let spec = project.jobSpec else { print("No destination (-o)."); return 2 }
     if let p = project.hdrProblem { print("HDR:", p); return 1 }
-    if let e = spec.videoEncode { print("\nENCODE: \(e.formats) · \(Fmt.int(e.frames)) frames @ \(e.fps) · \(e.width)×\(e.height) · \(e.encoder) \(e.video.speed?.preset ?? "") · quality \(e.video.quality?.label ?? "") · colour \(e.outputColor.text)" + (e.hdr.map { " · HDR10 \($0.mastering.text), MaxCLL \($0.maxCLL), MaxFALL \($0.maxFALL)" } ?? "")) }
+    if let e = spec.videoEncode { print("\nENCODE: \(e.formats) · \(Fmt.int(e.frames)) frames @ \(e.fps) · \(e.width)×\(e.height) · \(e.encoder) \(e.video.speed?.preset ?? "") · quality \(e.video.quality?.label ?? "") · colour \(e.outputColor.text)" + (e.colourNote.map { " (\($0))" } ?? "") + (e.gamutWarning.map { " · WARNING: \($0)" } ?? "") + (e.hdr.map { " · HDR10 \($0.mastering.text), MaxCLL \($0.maxCLL), MaxFALL \($0.maxFALL)" } ?? "")) }
     print("\nCOMMAND: \(project.commandPreview)\n")
     let runner = JobRunner(spec)
     var lastPrint = Date.distantPast

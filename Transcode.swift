@@ -295,6 +295,7 @@ struct TranscodePlan {
     var resolution: OutputResolution = .same
     var container: Container = .mov
     var timecode: String? = nil        // written as a QuickTime timecode track (MOV/MP4)
+    var convertGamut = true            // HDR: a P3-D65 / BT.709 source is carried in BT.2020, as HDR10 and Dolby Vision expect; off = tagged as it came
 
     init(source: SourceVideo, video: VideoTarget) {
         self.source = source
@@ -332,6 +333,7 @@ struct TranscodePlan {
     /// The colour written: the source's, with the gaps filled the way the destination expects; or BT.709 after a tone map
     var outputColor: SourceColor {
         if color == .toneMapToSDR { return .bt709 }
+        if gamutConversion != nil { return .bt2020PQ }
         let src = source.color
         let hdrTarget = video.codec == .hevc && hdr != nil
         let primaries = src.primaries ?? (hdrTarget ? "bt2020" : "bt709")
@@ -343,6 +345,22 @@ struct TranscodePlan {
         return SourceColor(primaries: primaries, transfer: transfer, matrix: matrix!, range: range)
     }
     var isBT2020: Bool { outputColor.primaries == "bt2020" }
+
+    /// An HDR (PQ) encode from a source whose primaries aren't BT.2020: the picture is converted in linear light to
+    /// BT.2020, the container HDR10 and Dolby Vision are defined in. The source primaries tag, or nil when nothing converts.
+    var gamutConversion: String? {
+        guard convertGamut, color == .passthrough, video.codec == .hevc, hdr != nil,
+              let p = source.color.primaries, p != "bt2020", ColorLUT.primaries(p) != nil,
+              (source.color.transfer ?? "smpte2084") == "smpte2084" else { return nil }
+        return p
+    }
+    /// The HDR encode that keeps non-BT.2020 primaries: said out loud, never silent
+    var gamutWarning: String? {
+        guard color == .passthrough, video.codec == .hevc, hdr != nil, gamutConversion == nil,
+              let p = source.color.primaries, p != "bt2020" else { return nil }
+        return "The source is \(ColorLUT.label(p)); HDR10 and Dolby Vision streams are BT.2020. The output stays tagged \(outputColor.text) — players that assume BT.2020 will shift the hues. Turn the BT.2020 conversion on (recommended)."
+    }
+    var colourNote: String? { gamutConversion.map { "\(ColorLUT.label($0)) → BT.2020, converted in linear light; the colours don't change, BT.2020 is the container HDR10 and Dolby Vision expect" } }
 
     var pixFmt: String {
         switch video {
@@ -399,6 +417,7 @@ struct TranscodePlan {
         if s.isHDR && video.codec == .h264 && color == .passthrough { w.append("The source is HDR (\(s.color.short)); H.264 players will show it washed out. Turn on the tone mapping to SDR / BT.709.") }
         if s.isHDR && video.codec == .hevc && hdr == nil && color == .passthrough { w.append("The source is HDR (\(s.color.short)): the HEVC keeps its PQ/HLG tags but carries no HDR10 metadata. Choose the Dolby Vision / HDR preset for a proper HDR file.") }
         if !s.isHDR && s.color.isTagged && hdr != nil { w.append("The source is tagged \(s.color.short) (SDR) — HDR10 / Dolby Vision metadata would describe it wrongly.") }
+        if let g = gamutWarning { w.append(g) }
         if !s.color.isComplete && color == .passthrough { w.append("The source's colour tags are incomplete (\(s.color.isTagged ? s.color.text : "none")); the output is tagged \(outputColor.text) (\(hdr != nil ? "BT.2020 / PQ, as HDR needs" : "BT.709 assumed")).") }
         if resizes && outputWidth > width { w.append("Upscaling \(s.sizeText) → \(outputWidth)×\(outputHeight): no detail is gained.") }
         if video.codec == .prores && container != .mov { w.append("ProRes belongs in MOV — \(container.rawValue.uppercased()) players rarely open it.") }
@@ -453,7 +472,7 @@ struct TranscodePlan {
         add("Alpha", s.hasAlpha ? "yes" : "none", keepsAlpha ? "kept" : (s.hasAlpha ? "discarded" : "none"))
         add("Resolution", s.sizeText, "\(outputWidth)×\(outputHeight)")
         add("Frame rate", "\(s.fpsText) fps", "\(s.fpsText) fps")
-        add("Colour", s.color.isTagged ? s.color.text : "untagged", outputColor.text)
+        add("Colour", s.color.isTagged ? s.color.text : "untagged", outputColor.text + (colourNote.map { " — \($0)" } ?? ""))
         add("HDR", s.isHDR ? (s.hdrFormat ?? s.color.short) : "SDR", hdr?.formats ?? (outputColor.isHDR ? outputColor.short + " (no HDR10 metadata)" : "SDR"))
         add("Bitrate", s.bitRate > 0 ? Fmt.bitrate(s.bitRate) : "—", "~" + Fmt.bitrate(estimatedBytes * 8 / max(seconds, 0.001)))
         let a = s.audio.isEmpty ? "none" : s.audio.map(\.text).joined(separator: ", ")
@@ -502,13 +521,26 @@ enum Transcode {
         if p.color == .toneMapToSDR {
             chain.append("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv")
         }
-        var scale: [String] = []
-        if p.resizes { scale.append("\(p.outputWidth):\(p.outputHeight)") }
-        if p.rgbSource && p.color == .passthrough { scale.append("out_color_matrix=\(c.matrix == "bt2020nc" ? "bt2020" : "bt709")") }
-        scale.append("out_range=\(c.range ?? "tv")")
-        if p.video.codec == .hevc && p.isBT2020 { scale.append("out_h_chr_pos=0:out_v_chr_pos=0") }   // UHD chroma siting (top-left, type 2)
-        scale.append("flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp")
-        chain.append("scale=" + scale.joined(separator: ":"))
+        if let from = p.gamutConversion {
+            // P3-D65 / BT.709 → BT.2020 in linear light: float RGB through the source's own matrix, the LUT, then BT.2020
+            // Y'CbCr with UHD chroma siting. A missing LUT makes ffmpeg fail loudly rather than write the wrong colour.
+            let lut = (try? ColorLUT.file(from: from))?.path ?? "/BROS-MUX-could-not-write-the-\(from)-to-bt2020-LUT.cube"
+            chain.append("scale=in_color_matrix=\(p.source.color.matrix ?? "bt709"):in_range=\(p.source.color.range ?? "tv"):out_range=pc:flags=accurate_rnd+full_chroma_int+full_chroma_inp")
+            chain.append("format=gbrpf32le")
+            chain.append("lut3d=file=\(ColorLUT.escaped(lut)):interp=tetrahedral")
+            var scale: [String] = []
+            if p.resizes { scale.append("\(p.outputWidth):\(p.outputHeight)") }
+            scale += ["in_range=pc", "out_color_matrix=bt2020", "out_range=tv", "out_h_chr_pos=0:out_v_chr_pos=0", "flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"]
+            chain.append("scale=" + scale.joined(separator: ":"))
+        } else {
+            var scale: [String] = []
+            if p.resizes { scale.append("\(p.outputWidth):\(p.outputHeight)") }
+            if p.rgbSource && p.color == .passthrough { scale.append("out_color_matrix=\(c.matrix == "bt2020nc" ? "bt2020" : "bt709")") }
+            scale.append("out_range=\(c.range ?? "tv")")
+            if p.video.codec == .hevc && p.isBT2020 { scale.append("out_h_chr_pos=0:out_v_chr_pos=0") }   // UHD chroma siting (top-left, type 2)
+            scale.append("flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp")
+            chain.append("scale=" + scale.joined(separator: ":"))
+        }
         chain.append("format=\(p.pixFmt)")
         // ffmpeg 6.1+ tags the output from the frames, not from -color_* (those are kept for older builds): the frames are
         // stamped with the colour written. x265 takes its colour from its own params, so the Mux path's command stays as it was.
@@ -1148,6 +1180,7 @@ final class TranscodeModel {
                             dolbyVision: hdr.dolbyVision ? hdr.dvSource : nil, dvXML: hdr.dolbyVision ? hdr.dvXMLReady : nil,
                             hdr10plus: hdr.hdr10plus ? hdr.hdr10plusJSON : nil)
         }
+        p.convertGamut = hdr.convertGamut
         return p
     }
     func problem(for item: TranscodeItem) -> String? {
