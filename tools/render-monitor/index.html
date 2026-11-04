@@ -190,7 +190,7 @@ function framePane(j){
       ${sc?`<div class="pct2">${n(sc.mbps)}<span>Mbps</span></div>
         <div class="sub">é o que a passada 2 deve dar para esta cena — a ${sc.rank}ª mais pesada de ${j.profile.scenes} medidas até aqui.</div>
         <div class="sub" style="margin-top:6px">Começou em ${tcf(sc.start,j.fps_video)} e dura ${Math.round(sc.frames/(j.fps_video||24))} s (${sc.frames} frames).</div>
-        ${j.profile.lag_frames>240?`<div class="sub" style="margin-top:6px;color:var(--ink-3)">O x265 grava as estatísticas em blocos, então esta cena é a de ${tcf(j.frame-j.profile.lag_frames,j.fps_video)}, não a da imagem ao lado (${tcf(j.frame,j.fps_video)}). Na passada 2 some esse atraso.</div>`:""}`
+        ${j.profile.lag_frames>240?`<div class="sub" style="margin-top:6px;color:var(--ink-3)">O x265 grava as estatísticas em blocos de 4 MiB, então o bitrate por cena vem <b>${hms(j.profile.lag_frames/j.fps_video)} de filme atrás</b> do frame que está sendo medido: esta cena é a de ${tcf(j.frame-j.profile.lag_frames,j.fps_video)}, não a da imagem ao lado (${tcf(j.frame,j.fps_video)}). O atraso cresce nas cenas pesadas, que demoram mais para encher um bloco, e some na passada 2, quando o arquivo já está pronto.</div>`:""}`
         :'<div class="empty">Esperando as estatísticas da passada 1.</div>'}
     </div>
   </div>`;
