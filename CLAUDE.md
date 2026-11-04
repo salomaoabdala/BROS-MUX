@@ -46,6 +46,14 @@ Duas coisas que já custaram caro:
 
 O servidor não sobe pelo painel de preview do Claude: ali ele perde a permissão do macOS para ler `/Volumes` e o gráfico de cenas morre com "Operation not permitted". Use o `monitor.command` ou `nohup python3 tools/render-monitor/monitor.py &` pelo terminal.
 
+## O app tem que funcionar sozinho, sem o Claude
+
+Regra do dono (2026-11-04). O BROS-MUX vai ser operado por gente sem o Claude e sem agentes, e tem que ser "bulletproof" assim mesmo. Por isso:
+
+1. **Todo erro corrigido vira também um aviso dentro do app.** Quando um erro é encontrado e consertado, a correção inclui um jeito de o programa reconhecer a situação sozinho e guiar quem opera — "isto chegou em P3-D65, o recomendado é BT.2020, quer converter?" —, com a recomendação certa e um botão para aceitar. Pop-up, painel ou item do Render QC: o que couber, mas nunca assumir em silêncio.
+2. Em toda correção, perguntar "como o app teria evitado isso sem mim?" e implementar a resposta junto com o conserto.
+3. **Atualizações saem na hora em que forem necessárias**, sem esperar a rotina da 01:00.
+
 ## Regras do app
 
 - **Aba Mux:** nada é recomprimido; as faixas só são juntadas. A única exceção é a recodificação automática para Dolby Vision/HDR10+, e ela tem que ser sempre anunciada com clareza, dizendo o que a ligou e mostrando fonte → destino.
