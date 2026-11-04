@@ -148,7 +148,7 @@ final class SyncViewerModel: Identifiable {
     /// where the sound under the playhead sits in the lower lane, relative to the playhead (s, + = later)
     var marker: Double? { target?.syncLag.map { $0 - (after ? Double(effectiveCut) / sampleRate : 0) } }
 
-    static func source(_ t: Track) -> SyncEngine.Source { .init(url: t.url, index: t.streamIndex, duration: t.duration, channels: t.channels) }
+    static func source(_ t: Track) -> SyncEngine.Source { SyncEngine.Source(t) }
 
     /// what to draw, captured on the main thread so the decoding never reads the live model
     private struct WindowJob { let ref: SyncEngine.Source; let cand: SyncEngine.Source; let start: Double; let length: Double; let shift: Double; let rate: Int }

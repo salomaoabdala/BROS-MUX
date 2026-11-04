@@ -306,6 +306,7 @@ final class PictureSyncModel: Identifiable {
         let fileAudioIndex: Int        // which audio track of its file (for AVFoundation)
         let playable: Bool
         var result: PictureSync.Result?
+        var members: [(url: URL, audioIndex: Int)] = []   // a mono group: every member plays together (MonoGroup.swift)
     }
     let project: Project
     let picture: URL
@@ -384,6 +385,16 @@ final class PictureSyncModel: Identifiable {
         let streams = Probe.raw(t.url)?.streams ?? []
         return streams.filter { $0.codec_type == "audio" && $0.index < t.streamIndex }.count
     }
+    /// The members of a mono group as (file, audio track in that file), for playback
+    static func memberAudio(_ t: Track) -> [(url: URL, audioIndex: Int)] {
+        guard t.isGroup else { return [] }
+        var cache: [String: [ProbeStream]] = [:]
+        return t.members.map { m in
+            let streams = cache[m.url.path] ?? (Probe.raw(m.url)?.streams ?? [])
+            cache[m.url.path] = streams
+            return (m.url, streams.filter { $0.codec_type == "audio" && $0.index < m.streamIndex }.count)
+        }
+    }
 
     /// what the trim moves the track by (s): positive = the source is read later
     func shift(of t: Track) -> Double {
@@ -396,14 +407,15 @@ final class PictureSyncModel: Identifiable {
         guard !isOutput else { return }
         var new: [Lane] = []
         if let r = project.reference {
-            new.append(Lane(label: "REFERENCE · \(r.title) (\(r.fromVideoFile ? "the video's own audio" : r.url.lastPathComponent))",
+            new.append(Lane(label: "REFERENCE · \(r.title) (\(r.fromVideoFile ? "the video's own audio" : r.isGroup ? "\(r.members.count) mono files" : r.url.lastPathComponent))",
                             src: SyncViewerModel.source(r), shift: 0, fileAudioIndex: Self.audioIndexInFile(r), playable: true,
-                            result: lanes.first(where: { $0.label.hasPrefix("REFERENCE") })?.result))
+                            result: lanes.first(where: { $0.label.hasPrefix("REFERENCE") })?.result, members: Self.memberAudio(r)))
         }
         if let t = target {
             let raw = ["eac3", "truehd", "ac3"].contains(t.codecKey) && !t.fromVideoFile   // AVFoundation can't open raw Dolby elementary streams
             new.append(Lane(label: "\(t.title) · \(after ? "after alignment (as it will be muxed)" : "before alignment (as delivered)")",
-                            src: SyncViewerModel.source(t), shift: shift(of: t), fileAudioIndex: Self.audioIndexInFile(t), playable: !raw, result: nil))
+                            src: SyncViewerModel.source(t), shift: shift(of: t), fileAudioIndex: Self.audioIndexInFile(t), playable: !raw, result: nil,
+                            members: Self.memberAudio(t)))
         }
         lanes = new
     }
@@ -540,16 +552,20 @@ final class PictureSyncModel: Identifiable {
                     let cv = comp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
                     try cv?.insertTimeRange(range, of: vt, at: .zero)
                     cv?.preferredTransform = try await vt.load(.preferredTransform)
-                    let aAsset = AVURLAsset(url: lane.src.url)
-                    let aTracks = try await aAsset.loadTracks(withMediaType: .audio)
-                    guard lane.fileAudioIndex < aTracks.count else { playerNote = "The audio can't be opened by AVFoundation."; return }
-                    let ca = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-                    let srcStart = start + lane.shift
-                    if srcStart >= 0 {
-                        try ca?.insertTimeRange(CMTimeRange(start: CMTime(seconds: srcStart, preferredTimescale: ts), duration: range.duration), of: aTracks[lane.fileAudioIndex], at: .zero)
-                    } else {   // silence first, then the audio from its start
-                        let lead = CMTime(seconds: -srcStart, preferredTimescale: ts)
-                        try ca?.insertTimeRange(CMTimeRange(start: .zero, duration: range.duration - lead), of: aTracks[lane.fileAudioIndex], at: lead)
+                    // a mono group plays every member together (one composition track each)
+                    let parts: [(url: URL, audioIndex: Int)] = lane.members.isEmpty ? [(lane.src.url, lane.fileAudioIndex)] : lane.members
+                    for part in parts {
+                        let aAsset = AVURLAsset(url: part.url)
+                        let aTracks = try await aAsset.loadTracks(withMediaType: .audio)
+                        guard part.audioIndex < aTracks.count else { playerNote = "The audio can't be opened by AVFoundation."; return }
+                        let ca = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                        let srcStart = start + lane.shift
+                        if srcStart >= 0 {
+                            try ca?.insertTimeRange(CMTimeRange(start: CMTime(seconds: srcStart, preferredTimescale: ts), duration: range.duration), of: aTracks[part.audioIndex], at: .zero)
+                        } else {   // silence first, then the audio from its start
+                            let lead = CMTime(seconds: -srcStart, preferredTimescale: ts)
+                            try ca?.insertTimeRange(CMTimeRange(start: .zero, duration: range.duration - lead), of: aTracks[part.audioIndex], at: lead)
+                        }
                     }
                     item = AVPlayerItem(asset: comp)
                 }

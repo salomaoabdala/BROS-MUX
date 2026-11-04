@@ -353,9 +353,16 @@ struct Track: Identifiable {
     var syncApplied = false                    // the trim was set from that measurement (a track that couldn't be trimmed stays false)
     var syncPoints: [SyncEngine.Point] = []    // every point measured along the film (for the Sync Viewer)
     var imfSegments: [IMFResource] = []        // picture of an IMF package: the stretches of MXF the CPL uses
+    /// Several mono PCM sounds handled as one multichannel track (MonoGroup.swift): the members, in file order
+    var members: [Track] = []
+    var groupBPS = 0                           // bytes one sample of one channel takes
+    var groupTotal = 0                         // samples of the shortest member (the group's length)
+    var rolesSource: String? = nil             // where the group's channel roles came from (file labels, names, listening, by hand)
+    var listening = false                      // the group is being listened to in the background (ChannelID)
+    var isGroup: Bool { !members.isEmpty }
 
     var isPCM: Bool { codecKey.hasPrefix("pcm_") }
-    var canReorder: Bool { kind == .audio && isPCM && wav != nil && channels >= 2 }
+    var canReorder: Bool { kind == .audio && isPCM && (wav != nil || isGroup) && channels >= 2 }
     var sourceOrder: ChannelOrder? { channelRoles.map { ChannelOrder(roles: $0) } }
     /// Output channel k takes source channel permutation[k]; nil when nothing changes
     var channelPermutation: [Int]? {
@@ -369,13 +376,14 @@ struct Track: Identifiable {
         if channelMap == .auto, let src = sourceOrder, src.isComplete, src.count == channels { return src.layoutTag }   // roles heard or set by hand beat the declared mask
         return channelMap.tag(channels: channels, layout: channelLayout)
     }
-    var blockAlign: Int { wav?.blockAlign ?? max(1, channels * max(bitDepth, 8) / 8) }
+    var blockAlign: Int { wav?.blockAlign ?? (isGroup ? channels * groupBPS : max(1, channels * max(bitDepth, 8) / 8)) }
     var totalSamples: Int {
+        if isGroup { return groupTotal }
         if let wav { return wav.dataSize / max(1, wav.blockAlign) }
         return Int((duration * sampleRate).rounded())
     }
     /// Trim/align with no re-encode: PCM from WAV (sample exact) and E-AC-3 (per Dolby frame)
-    var canTrim: Bool { kind == .audio && ((isPCM && wav != nil) || codecKey == "eac3") }
+    var canTrim: Bool { kind == .audio && ((isPCM && (wav != nil || isGroup)) || codecKey == "eac3") }
     var trimStartMs: Double {
         get { sampleRate > 0 ? Double(trimStart) * 1000 / sampleRate : 0 }
         set { trimStart = sampleRate > 0 ? Int((newValue * sampleRate / 1000).rounded()) : 0 }
@@ -922,10 +930,34 @@ enum SyncEngine {
         let spreadMs: Double
         let message: String
     }
-    struct Source { let url: URL; let index: Int; let duration: Double; var channels = 0 }
+    struct Source {
+        let url: URL; let index: Int; let duration: Double; var channels = 0
+        /// A group of mono sounds (MonoGroup.swift): decoded together and summed to one mono signal
+        var members: [(url: URL, index: Int)] = []
+        var mix: [Int] = []                    // which members go into the sum (empty = all; the LFE is left out when known)
+    }
 
     static func decode(_ s: Source, from start: Double, length: Double, rate: Int) -> [Float] {
         guard let ffmpeg = Tools.ffmpeg, start >= 0, length > 0 else { return [] }
+        if !s.members.isEmpty {
+            // every mono source is opened at the same instant (a file that holds several members is opened once),
+            // merged, converted to float so the sum can't overflow, and summed
+            var files: [String] = [], labels: [String] = []
+            var args = ["-nostdin", "-v", "error"]
+            for m in s.members {
+                var k = files.firstIndex(of: m.url.path)
+                if k == nil {
+                    files.append(m.url.path); k = files.count - 1
+                    args += ["-ss", String(format: "%.6f", start), "-t", String(format: "%.6f", length), "-i", m.url.path]
+                }
+                labels.append("[\(k!):\(m.index)]")
+            }
+            let mix = s.mix.isEmpty ? Array(s.members.indices) : s.mix
+            let graph = labels.joined() + "amerge=inputs=\(s.members.count),aformat=sample_fmts=flt,pan=mono|c0=" + mix.map { "c\($0)" }.joined(separator: "+")
+            args += ["-filter_complex", graph, "-ar", "\(rate)", "-f", "f32le", "-"]
+            guard let d = Tools.runSync(ffmpeg, args), d.count >= 4 else { return [] }
+            return d.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        }
         // many channels (an ADM Atmos master, 7.1.4…) have no standard downmix: they're summed
         let mono = s.channels > 8 ? ["-af", "pan=mono|c0=" + (0..<s.channels).map { "c\($0)" }.joined(separator: "+")] : ["-ac", "1"]
         let args = ["-nostdin", "-v", "error", "-ss", String(format: "%.6f", start), "-t", String(format: "%.6f", length),
@@ -1026,6 +1058,20 @@ enum SyncEngine {
         let spread = values.map { abs($0 - lag) * 1000 }.max() ?? 0
         let msg = String(format: "%+.6f s · %d of %d points agree · spread ±%.2f ms", lag, inl.count, pts.count, spread)
         return Result(lag: lag, points: pts, inliers: inl.count, valid: valid.count, spreadMs: spread, message: msg)
+    }
+}
+
+extension SyncEngine.Source {
+    /// The sound of a track: one stream, or every member of a mono group summed (without the LFE, when the roles are known)
+    init(_ t: Track) {
+        self.init(url: t.url, index: t.streamIndex, duration: t.duration, channels: t.channels)
+        if t.isGroup {
+            members = t.members.map { ($0.url, $0.streamIndex) }
+            if let r = t.channelRoles, r.count == members.count {
+                let noLFE = r.indices.filter { r[$0] != .LFE }
+                if !noLFE.isEmpty { mix = noLFE }
+            }
+        }
     }
 }
 
@@ -1260,6 +1306,7 @@ enum VerifySource {
     case ffmpeg(URL, Int)                                   // whole source track via ffmpeg
     case wav(URL, WavInfo, pad: Int, cut: Int, keep: Int, order: [Int]? = nil)   // bytes read straight from the WAV (channels permuted the same way)
     case eac3(URL, Int, skip: Int, keep: Int)              // source frames, with the same trim
+    case group(Track, pad: Int, cut: Int, keep: Int)       // mono sources interleaved into one track: checked channel by channel (MonoGroup.swift)
     case none
 }
 
@@ -1299,6 +1346,9 @@ enum Verifier {
             let ok = a.count == 32 && a == b
             return Result(ok: ok, text: ok ? "\(name): bit-identical ✓ (MD5 of all packets \(a.prefix(8))…)" : "\(name): DIFFERENT from the source ✗")
         }
+        if case .group(let g, let pad, let cut, let keep) = source {
+            return GroupSources.verify(g, pad: pad, cut: cut, keep: keep, out: out, outStream: outStream, cancel: cancel, progress: progress)
+        }
         guard let fmt = rawFormat(outCodec) else { return Result(ok: true, text: "\(name): bit-for-bit check not available for \(outCodec)") }
         let src: ByteSource
         do {
@@ -1310,7 +1360,7 @@ enum Verifier {
                 src = try WavRangeSource(url, info: info, pad: pad, cut: cut, keep: keep, order: order)
             case .eac3(let url, let idx, let skip, let keep):
                 src = try EAC3SliceSource(url, index: idx, skip: skip, keep: keep)
-            case .none:
+            case .none, .group:
                 return Result(ok: true, text: "\(name): not verified")
             }
         } catch { return Result(ok: false, text: "\(name): \(error.localizedDescription)") }
@@ -1742,8 +1792,8 @@ final class JobRunner {
         if spec.tracks.isEmpty { return "No tracks selected." }
         let out = spec.output
         guard ["mov", "mp4", "mkv"].contains(out.pathExtension.lowercased()) else { return "The output must end in .mov, .mp4 or .mkv." }
-        var inputs = spec.tracks.map(\.url)
-        if let r = spec.reference { inputs.append(r.url) }
+        var inputs = spec.tracks.flatMap { [$0.url] + $0.members.map(\.url) }
+        if let r = spec.reference { inputs.append(r.url); inputs += r.members.map(\.url) }
         if inputs.contains(where: { Tools.sameFile($0, out) }) {
             return "The output can't be one of the source files — choose another name."
         }
@@ -1770,7 +1820,7 @@ final class JobRunner {
         // space: MP4Box writes a temporary file as big as the output before interleaving (+ the encoded picture, + the MKV copy)
         let outBytes = spec.tracks.reduce(0.0) { $0 + estimatedBytes($1, plan: spec.plans[$1.id], encode: spec.videoEncode) }
         let tempBytes = spec.tracks.reduce(0.0) { sum, t in
-            guard let p = spec.plans[t.id], !p.isIdentity || t.channelPermutation != nil else { return sum }   // a reorder-only track gets a full temp copy too
+            guard let p = spec.plans[t.id], !p.isIdentity || t.channelPermutation != nil || t.isGroup else { return sum }   // a reorder-only track gets a full temp copy too; a mono group is always written out
             return sum + estimatedBytes(t, plan: p)
         }
         let need = outBytes * 2 + tempBytes + (spec.videoEncode?.estimatedBytes ?? 0) * 2 + (spec.isMKV ? outBytes : 0) + 1_000_000_000
@@ -1913,7 +1963,7 @@ final class JobRunner {
             for (n, i) in audios.enumerated() {
                 let t = spec.tracks[i]
                 guard let s = outStream(for: i) else { continue }
-                let r = SyncEngine.measure(ref: .init(url: ref.url, index: ref.streamIndex, duration: ref.duration, channels: ref.channels),
+                let r = SyncEngine.measure(ref: SyncEngine.Source(ref),
                                            cand: .init(url: tmpOut, index: s.index, duration: Double(s.duration ?? "") ?? t.duration, channels: s.channels ?? t.channels),
                                            rate: Int(t.sampleRate > 0 ? t.sampleRate : 48000), maxLag: 10, points: 9,
                                            cancel: cancel) { p in
@@ -2006,6 +2056,33 @@ final class JobRunner {
             encodedRPU = r.rpu
             return Prepared(path: gpacTmp.appendingPathComponent(r.hevc.lastPathComponent).path, selector: nil, rangeEnd: nil,
                             verify: .none, note: r.notes.joined(separator: "\n"), importOptions: e.importOptions(mov: spec.isMOV))
+        }
+        if t.kind == .audio, t.isGroup, let plan = spec.plans[t.id] {
+            // several mono sounds → one multichannel WAV, frame by frame, in the order chosen (MonoGroup.swift)
+            let dst = tmp.appendingPathComponent("audio\(index).wav")
+            let ordered = t.orderedMembers
+            let bps = t.groupBPS
+            let what = t.fromVideoFile ? "streams" : "files"
+            let chText = Probe.channelText(t.channels, nil)
+            var sources: [ByteSource] = []
+            defer { for s in sources { try? s.finish() } }
+            for m in ordered { sources.append(try GroupSources.open(m, as: t.codecKey, bps: bps, pad: plan.pad, cut: plan.cut, keep: plan.keep)) }
+            let order = t.channelPermutation != nil ? t.channelTarget : t.sourceOrder
+            let fmt = GroupSources.fmtChunk(channels: t.channels, sampleRate: t.sampleRate, bps: bps, validBits: t.bitDepth, float: t.isFloatPCM,
+                                            order: order?.isComplete == true ? order : nil)
+            try GroupSources.writeInterleaved(sources, bps: bps, frames: plan.pad + plan.keep, fmt: fmt, to: dst, cancel: cancel) { p in
+                self.onStage("Interleaving \(t.channels) mono \(what) into one \(chText) track “\(t.title)” (sample exact)…", p)
+            }
+            let sr = t.sampleRate
+            var parts = ["\(t.channels) mono \(what) interleaved into one \(chText) PCM track"]
+            if let o = order, o.isComplete { parts.append("channels " + o.text + (t.channelPermutation != nil ? " (reordered from \(t.sourceOrder?.text ?? "the file order"))" : "")) }
+            else { parts.append("in file order, no channel labels") }
+            if plan.cut > 0 { parts.append("cut \(Fmt.int(plan.cut)) samples (\(String(format: "%.3f", Double(plan.cut) / sr)) s) from the head of every channel") }
+            if plan.pad > 0 { parts.append("added \(Fmt.int(plan.pad)) samples of silence at the head of every channel") }
+            if plan.tail > 0 { parts.append("\(Fmt.int(plan.tail)) samples (\(String(format: "%.3f", Double(plan.tail) / sr)) s) from the tail") }
+            return Prepared(path: gpacTmp.appendingPathComponent(dst.lastPathComponent).path, selector: nil, rangeEnd: nil,
+                            verify: .group(t, pad: plan.pad, cut: plan.cut, keep: plan.keep),
+                            note: "“\(t.title)”: " + parts.joined(separator: ", ") + " — every sample copied as it is, no re-encoding")
         }
         if t.kind == .audio, let plan = spec.plans[t.id], !plan.isIdentity || t.channelPermutation != nil {
             if t.isPCM, let wav = t.wav {
@@ -2437,6 +2514,7 @@ final class Project {
             }
             DispatchQueue.main.async {
                 self.loadingCount -= 1
+                self.autoGroup()
                 self.chooseDefaultReference()
             }
         }
@@ -2473,15 +2551,82 @@ final class Project {
         }
     }
 
-    /// If the video has its own audio and there are standalone audio files, the video's audio becomes the sync reference (and leaves the output)
+    /// If the video has its own audio (a guide stereo or mono) and there are standalone audio files, the video's audio
+    /// becomes the sync reference (and leaves the output). A 5.1 inside the video is a deliverable, not a guide: it stays.
     func chooseDefaultReference() {
         guard reference == nil,
-              let ref = tracks.first(where: { $0.kind == .audio && $0.fromVideoFile }),
+              let ref = tracks.first(where: { $0.kind == .audio && $0.fromVideoFile && $0.channels <= 2 }),
               tracks.contains(where: { $0.kind == .audio && !$0.fromVideoFile }) else { return }
         syncReferenceID = ref.id
         if let i = tracks.firstIndex(where: { $0.id == ref.id }), tracks[i].include {
             tracks[i].include = false
             notices.append("The video's own audio (“\(ref.title)”) is now the sync reference and won't be in the output. Check its box if you want to include it.")
+        }
+    }
+
+    // MARK: mono sounds as one track (MonoGroup.swift)
+
+    /// Mono PCM tracks still on their own
+    var groupCandidates: [Track] { tracks.filter { $0.kind == .audio && $0.isPCM && $0.channels == 1 && !$0.isGroup } }
+    /// The sets that would be grouped: the mono streams of each movie file, and all standalone mono files together
+    static func groupSets(_ monos: [Track]) -> [[Track]] {
+        var sets: [String: [Track]] = [:], order: [String] = []
+        for t in monos {
+            let k = t.fromVideoFile ? t.url.path : "standalone"
+            if sets[k] == nil { order.append(k) }
+            sets[k, default: []].append(t)
+        }
+        return order.compactMap { k in sets[k].flatMap { Track.groupable($0) ? $0 : nil } }
+    }
+    /// After a batch of files is read: mono sounds that form a standard layout become one track
+    func autoGroup() {
+        for set in Self.groupSets(groupCandidates) { makeGroup(set.map(\.id)) }
+    }
+    func makeGroup(_ ids: [UUID]) {
+        let members = ids.compactMap { id in tracks.first { $0.id == id } }
+        guard members.count >= 2, var g = Track.group(members) else { return }
+        let pos = tracks.firstIndex { $0.id == members[0].id } ?? tracks.count
+        if let r = syncReferenceID, ids.contains(r) {
+            // the reference was one of the monos: a guide stereo stays the reference; a 5.1 is a deliverable and comes back in
+            if g.channels <= 2 { syncReferenceID = g.id; g.include = false } else { syncReferenceID = nil }
+        }
+        tracks.removeAll { t in ids.contains(t.id) }
+        tracks.insert(g, at: min(pos, tracks.count))
+        let what = g.fromVideoFile ? "mono streams of \(g.url.lastPathComponent)" : "mono files"
+        if let roles = g.channelRoles {
+            notices.append("\(members.count) \(what) are one \(Probe.channelText(g.channels, nil)) track: \(ChannelOrder(roles: roles).text) (\(g.rolesSource ?? "")). “Channels…” on the track changes or ungroups them.")
+        } else {
+            notices.append("\(members.count) \(what) are one \(Probe.channelText(g.channels, nil)) track; which is which isn't in the files or their names, so the app is listening to them. “Channels…” on the track changes or ungroups them.")
+            listen(to: g.id)
+        }
+    }
+    func ungroup(_ id: UUID) {
+        guard let i = tracks.firstIndex(where: { $0.id == id }), tracks[i].isGroup else { return }
+        let g = tracks.remove(at: i)
+        var members = g.members
+        for k in members.indices { members[k].include = g.include; members[k].language = g.language }
+        tracks.insert(contentsOf: members, at: i)
+        if syncReferenceID == id { syncReferenceID = nil }
+    }
+    /// Listens to a group in the background (ChannelID over the members) and fills in the roles if nobody set them meanwhile
+    func listen(to id: UUID) {
+        guard let i = tracks.firstIndex(where: { $0.id == id }), tracks[i].isGroup, !tracks[i].listening else { return }
+        tracks[i].listening = true
+        let g = tracks[i]
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = ChannelID.analyzeGroup(g)
+            DispatchQueue.main.async {
+                guard let j = self.tracks.firstIndex(where: { $0.id == id }), self.tracks[j].isGroup else { return }
+                self.tracks[j].listening = false
+                guard self.tracks[j].channelRoles == nil, let r else { return }
+                let roles = r.guesses.map(\.role)
+                self.tracks[j].channelRoles = roles
+                self.tracks[j].channelConfidence = r.overall
+                self.tracks[j].channelReport = r.text
+                self.tracks[j].rolesSource = "heard"
+                let order = ChannelOrder(roles: roles)
+                self.tracks[j].channelTarget = order.isComplete ? ChannelOrder.presets(channels: roles.count).first?.order : nil
+            }
         }
     }
 
@@ -2670,9 +2815,7 @@ final class Project {
         for (n, t) in targets.enumerated() {
             if cancel.isSet { break }
             let sr = Int(t.sampleRate > 0 ? t.sampleRate : 48000)
-            let r = SyncEngine.measure(ref: .init(url: ref.url, index: ref.streamIndex, duration: ref.duration, channels: ref.channels),
-                                       cand: .init(url: t.url, index: t.streamIndex, duration: t.duration, channels: t.channels),
-                                       rate: sr, cancel: cancel) { p in
+            let r = SyncEngine.measure(ref: SyncEngine.Source(ref), cand: SyncEngine.Source(t), rate: sr, cancel: cancel) { p in
                 stage("Measuring “\(t.title)” (\(n + 1) of \(targets.count))…", p)
             }
             guard let lag = r.lag else {
@@ -2763,7 +2906,7 @@ final class Project {
         guard let out = outputURL else { return nil }
         let inc = included
         var plans: [UUID: TrimPlan] = [:]
-        for t in inc where t.kind == .audio { if let p = plan(for: t), !p.isIdentity || t.channelPermutation != nil { plans[t.id] = p } }
+        for t in inc where t.kind == .audio { if let p = plan(for: t), t.isGroup || !p.isIdentity || t.channelPermutation != nil { plans[t.id] = p } }
         return JobSpec(tracks: inc, plans: plans, output: out, disableExtraAudio: disableExtraAudio, interleaveMs: interleaveMs,
                        writeChannelMap: writeChannelMap, verifyAudio: verifyAudio, verifyVideo: verifyVideo,
                        fixColorTag: fixColorTag, isMOV: container == .mov, reference: reference,
@@ -2776,6 +2919,9 @@ final class Project {
             if t.kind == .video, let e = spec.videoEncode {
                 return JobRunner.Prepared(path: "<HEVC encoded from \(t.url.lastPathComponent)>", selector: nil, rangeEnd: nil, verify: .none, note: nil,
                                           importOptions: e.importOptions(mov: spec.isMOV))
+            }
+            if t.isGroup {
+                return JobRunner.Prepared(path: "<\(t.channels) mono \(t.fromVideoFile ? "streams" : "files") interleaved into one \(Probe.channelText(t.channels, nil)) WAV>", selector: nil, rangeEnd: nil, verify: .none, note: nil)
             }
             return JobRunner.Prepared(path: (spec.plans[t.id].map { $0.isIdentity ? "<channel-reordered temp copy of \(t.url.lastPathComponent)>" : "<trimmed temp copy of \(t.url.lastPathComponent)>" } ?? t.url.path),
                                selector: spec.plans[t.id] != nil ? nil : t.selector,
@@ -3039,6 +3185,7 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
             }
         }
     }
+    project.autoGroup()
     if let l = a.lang { for i in project.tracks.indices where project.tracks[i].kind == .audio { project.tracks[i].language = l } }
     var titles = a.audioTitles[...]
     for i in project.tracks.indices where project.tracks[i].kind == .audio && project.tracks[i].include {
@@ -3111,7 +3258,7 @@ func runJobCLI(_ args: [String]) -> Int32 {
     let a = CLIArgs(args)
     // never fall back to a default destination from the command line — an explicit -o is required
     guard let o = a.output, ["mov", "mp4", "mkv"].contains((o as NSString).pathExtension.lowercased()) else {
-        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--encode --dv XML|MXF --hdr10plus JSON --quality maximum|high|compact --speed slow|medium|fast|draft] (an explicit -o is required)"); return 2
+        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft] (an explicit -o is required)"); return 2
     }
     let project = buildProject(a, output: a.output)
     print("\nTRACKS:")

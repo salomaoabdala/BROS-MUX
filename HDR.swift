@@ -492,14 +492,15 @@ struct MasteringDisplay: Equatable {
 @Observable
 final class HDRSettings {
     enum Quality: String, CaseIterable, Identifiable {
-        case maximum, high, compact
+        case master, maximum, high, compact
         var id: String { rawValue }
-        var label: String { switch self { case .maximum: return "Maximum"; case .high: return "High"; case .compact: return "Compact" } }
-        var crf: Double { switch self { case .maximum: return 14; case .high: return 16; case .compact: return 19 } }
-        var maxMbps: Int { switch self { case .maximum: return 100; case .high: return 70; case .compact: return 40 } }
-        var averageMbps: Double { switch self { case .maximum: return 60; case .high: return 40; case .compact: return 22 } }
+        var label: String { switch self { case .master: return "Master"; case .maximum: return "Maximum"; case .high: return "High"; case .compact: return "Compact" } }
+        var crf: Double { switch self { case .master: return 10; case .maximum: return 14; case .high: return 16; case .compact: return 19 } }
+        var maxMbps: Int { switch self { case .master: return 160; case .maximum: return 100; case .high: return 70; case .compact: return 40 } }
+        var averageMbps: Double { switch self { case .master: return 100; case .maximum: return 60; case .high: return 40; case .compact: return 22 } }
         var detail: String {
             switch self {
+            case .master: return "≈ 80–160 Mb/s, well above a UHD Blu-ray — as close to the master as a player can play (Level 5.1 High tier)"
             case .maximum: return "≈ 40–90 Mb/s, like a UHD Blu-ray"
             case .high: return "≈ 30–60 Mb/s, above the best streaming"
             case .compact: return "≈ 15–35 Mb/s, like 4K streaming"

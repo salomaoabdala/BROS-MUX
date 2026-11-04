@@ -1,10 +1,11 @@
-# BROS-MUX (v.1.5)
+# BROS-MUX (v.1.6)
 
 Muxer, verificador de sync e QC para entrega de filmes, da Abdala Brothers. App nativo de macOS (SwiftUI), só para Apple Silicon, que embrulha MP4Box, ffmpeg, ffprobe, MediaInfo, dovi_tool e hdr10plus_tool. Nada é recomprimido: cada faixa entra e sai bit a bit. Foi feito para entregar o filme **2DIE4** ao Academy Screening Room.
 
 ## O que ele faz
 
 - **Mux sem perda** de vídeo + áudios (PCM, Dolby Digital Plus JOC/Atmos, TrueHD) em MOV/MP4 com os átomos de canal e Dolby corretos para QuickTime, Resolve e a Academia; MKV sem perda para home theater.
+- **Vários monos = um som só** (v1.6): WAVs mono (um por canal) ou os streams mono que o Resolve grava dentro do MOV ProRes viram UMA faixa multicanal (estéreo, LCR, 5.0, 5.1, 7.1). Quem é quem vem dos rótulos de canal gravados nos arquivos, depois dos nomes (`.L.wav`, `_LFE`, `Ls`, `Lss`, `Rsr`…) e, se nada disser, da escuta do ChannelID em segundo plano; a folha "Channels…" mostra cada arquivo por canal, deixa corrigir, escolher a ordem de saída (SMPTE L R C LFE Ls Rs por padrão) ou desagrupar. O Align, o Sync Viewer e o Picture Check tratam o grupo como uma faixa (a referência é a soma dos canais sem o LFE) e um único offset corta os mesmos samples inteiros em todos os canais. No mux os monos são intercalados num WAV temporário sem recompressão, entram no MP4Box como uma faixa com os rótulos de canal, e a verificação bit a bit desintercala a faixa final e confere cada canal contra o mono de origem. Um 5.1 dentro do vídeo deixa de virar referência de sync automaticamente (é entrega, não guia); só um guia estéreo/mono vira.
 - **Apple Silicon** (v1.5): o app é compilado só para arm64 — não existe fatia Intel, de propósito, então o macOS nunca o executa via Rosetta (era isso que disparava o aviso "Support Ending for Intel-based Apps" do macOS 26). Requer um Mac com Apple Silicon (M1 ou mais novo).
 - **Zidoo** (v1.5): o File Checker e o resultado do mux dizem se o arquivo toca no Zidoo da sala de projeção (container, vídeo e áudio contra as especificações publicadas pela Zidoo), com selo e ressalva; no Mux o selo é previsto a partir das fontes antes de muxar, e o relatório em texto ganha a seção ZIDOO PLAYBACK.
 - **Dolby Digital Plus atrasado sem recodificar** (v1.5): uma faixa E-AC-3 que precisa começar mais tarde recebe um start delay no container (edit list — `delay=N/48000:moovts=-1` no MP4Box) em vez de silêncio recodificado; nenhum frame Dolby é tocado, e no Sync Viewer o ▶ pode empurrar o som para depois de zero.
@@ -43,7 +44,7 @@ A tela inicial do app mostra cada engine com a versão instalada; o que faltar a
 ./build.sh
 ```
 
-Gera `build/BROS-MUX.app` só para Apple Silicon (arm64, whole-module optimization) com `swiftc`, sem Xcode project — não há fatia Intel, de propósito, e o Info.plist declara `LSRequiresNativeExecution`, então o app nunca roda via Rosetta. A versão fica em `VERSION` no `build.sh` e em `AppInfo.version` no `Design.swift`.
+Gera `build.noindex/BROS-MUX.app` só para Apple Silicon (arm64, whole-module optimization) com `swiftc`, sem Xcode project — não há fatia Intel, de propósito, e o Info.plist declara `LSRequiresNativeExecution`, então o app nunca roda via Rosetta. A versão fica em `VERSION` no `build.sh` e em `AppInfo.version` no `Design.swift`.
 
 ## Linha de comando
 
@@ -71,6 +72,7 @@ O binário dentro do app aceita alguns comandos sem interface:
 | `MuxUI.swift`, `CheckerUI.swift`, `Design.swift`, `ABMark.swift` | interface (Apple HIG) e sistema de design |
 | `SyncViewer.swift`, `PictureSync.swift` | sync por forma de onda e por cortes de imagem |
 | `ChannelID.swift`, `ChannelOrderUI.swift` | identificação e reordenação de canais PCM |
+| `MonoGroup.swift` | vários monos (WAVs ou streams do MOV) como uma faixa multicanal: detecção, intercalação, verificação canal a canal |
 | `RenderQCEngine.swift`, `RenderQC.swift` | motor e aba do Render QC |
 | `HDR.swift` | Dolby Vision / HDR10+ |
 | `AtmosDecoder.swift`, `AtmosOAMD.swift`, `AtmosViz.swift` | metadados Atmos e visualizador 3D |

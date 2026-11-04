@@ -46,10 +46,14 @@ struct ChannelOrderSheet: View {
     @State private var problem: String?
     @State private var cancel = CancelFlag()
     @State private var showReport = false
+    @State private var loadedRoles: [ChannelRole] = []      // the roles as they were when the sheet opened
+    /// A mono group (MonoGroup.swift): "Ungroup" puts the mono tracks back on their own
+    var onUngroup: (() -> Void)? = nil
 
-    init(track: Binding<Track>, initialReport: ChannelID.Report? = nil) {
+    init(track: Binding<Track>, initialReport: ChannelID.Report? = nil, onUngroup: (() -> Void)? = nil) {
         _track = track
         _report = State(initialValue: initialReport)
+        self.onUngroup = onUngroup
     }
 
     var presets: [ChannelOrder.Preset] { ChannelOrder.presets(channels: track.channels) }
@@ -71,7 +75,7 @@ struct ChannelOrderSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Channel order").font(.title2.weight(.semibold))
-                    Text("\(track.title) · \(track.channels) channels · \(Int(track.sampleRate)) Hz · \(track.bitDepth)-bit PCM").font(.caption).foregroundStyle(.secondary)
+                    Text("\(track.title) · \(track.channels) channels" + (track.isGroup ? " (\(track.members.count) mono \(track.fromVideoFile ? "streams of \(track.url.lastPathComponent)" : "files"))" : "") + " · \(Int(track.sampleRate)) Hz · \(track.bitDepth)-bit PCM").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if report != nil { Button("Report…") { showReport = true } }
@@ -89,7 +93,8 @@ struct ChannelOrderSheet: View {
                             Button(report == nil ? "Listen to the track" : "Listen again") { listen() }
                         }
                     }
-                    Text("40 passages between 5% and 80% of the track: the LFE has nothing above 120 Hz, the front pair is the loud pair that moves together, the centre carries the speech, the surrounds are what is left. Left and right inside a pair follow the file order; the sound cannot tell them apart.")
+                    Text((track.isGroup ? "Each mono \(track.fromVideoFile ? "stream" : "file") is one channel" + (track.rolesSource.map { "; the roles shown were \($0)" } ?? "") + ". " : "") +
+                         "40 passages between 5% and 80% of the track: the LFE has nothing above 120 Hz, the front pair is the loud pair that moves together, the centre carries the speech, the surrounds are what is left. Left and right inside a pair follow the file order; the sound cannot tell them apart.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     if let r = report {
                         HStack(spacing: 8) {
@@ -162,6 +167,10 @@ struct ChannelOrderSheet: View {
 
             HStack {
                 Button("Cancel") { cancel.set(); dismiss() }
+                if track.isGroup, let onUngroup {
+                    Button("Ungroup") { cancel.set(); dismiss(); onUngroup() }
+                        .help("Put the \(track.members.count) mono \(track.fromVideoFile ? "streams" : "files") back as separate tracks")
+                }
                 Spacer()
                 Button("Apply") { apply() }.keyboardShortcut(.defaultAction)
                     .disabled(running || !rolesComplete || (choice != "keep" && !targetValid))
@@ -184,6 +193,11 @@ struct ChannelOrderSheet: View {
         let f = report?.features[safe: c]
         return HStack(spacing: 8) {
             Text("Ch \(c + 1)").font(.subheadline.monospacedDigit()).frame(width: 36, alignment: .leading)
+            if track.isGroup, let m = track.members[safe: c] {
+                Text(m.fromVideoFile ? "stream \(m.streamIndex + 1)" : m.url.lastPathComponent)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).frame(width: 150, alignment: .leading)
+                    .help(m.url.path)
+            }
             Picker("", selection: $roles[c]) { ForEach(ChannelRole.allCases) { Text($0.rawValue).tag($0) } }
                 .labelsHidden().frame(width: 76)
             if let g {
@@ -194,7 +208,8 @@ struct ChannelOrderSheet: View {
                     if let f { Text(String(format: "%.0f dBFS · low %.0f%% · speech %.0f%% · high %.0f%%", f.level, f.low * 100, f.speech * 100, f.high * 100)).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary) }
                 }
             } else {
-                Text("set by hand").font(.caption).foregroundStyle(.tertiary)
+                Text(track.isGroup ? (track.rolesSource ?? "not identified") + (track.channelConfidence.map { String(format: " · %.0f%% sure", $0 * 100) } ?? "") : "set by hand")
+                    .font(.caption).foregroundStyle(.tertiary)
             }
             Spacer(minLength: 0)
         }
@@ -205,17 +220,20 @@ struct ChannelOrderSheet: View {
         else if let r = track.channelRoles, r.count == track.channels { roles = r }
         else if let p = presets.first { roles = p.order.roles }
         else { roles = (0..<track.channels).map { _ in .M } }
+        loadedRoles = roles
         custom = roles
         if let t = track.channelTarget { choice = presets.first { $0.order == t }?.id ?? "custom"; custom = t.roles }
         if let text = track.channelReport, report == nil, !text.isEmpty { /* the earlier report is kept as text only */ }
     }
 
     func listen() {
-        guard let wav = track.wav else { problem = "Only PCM read from a WAV file can be analysed."; return }
+        let group = track.isGroup ? track : nil
+        guard group != nil || track.wav != nil else { problem = "Only PCM read from a WAV file can be analysed."; return }
         running = true; progress = 0; problem = nil; cancel = CancelFlag()
-        let url = track.url, flag = cancel
+        let url = track.url, wav = track.wav, flag = cancel
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = ChannelID.analyze(url: url, info: wav, cancel: flag) { p in DispatchQueue.main.async { progress = p } }
+            let r = group.map { ChannelID.analyzeGroup($0, cancel: flag) { p in DispatchQueue.main.async { progress = p } } }
+                ?? ChannelID.analyze(url: url, info: wav!, cancel: flag) { p in DispatchQueue.main.async { progress = p } }
             DispatchQueue.main.async {
                 running = false
                 if let r { report = r; roles = r.guesses.map(\.role); if choice == "keep", let p = presets.first { custom = p.order.roles } }
@@ -229,6 +247,10 @@ struct ChannelOrderSheet: View {
         track.channelConfidence = heard ? report?.overall : nil
         track.channelReport = report?.text
         track.channelTarget = target
+        if track.isGroup {
+            if heard { track.rolesSource = "heard" }
+            else if roles != loadedRoles || track.rolesSource == nil { track.rolesSource = "set by hand" }
+        }
         dismiss()
     }
 }

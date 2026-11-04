@@ -7,12 +7,12 @@
 # LSRequiresNativeExecution, so Launch Services refuses to translate the app even if "Open using Rosetta" is ticked.
 set -e
 cd "$(dirname "$0")"
-VERSION=1.5                      # keep in step with AppInfo.version in Design.swift
+VERSION=1.6                      # keep in step with AppInfo.version in Design.swift
 NAME="BROS-MUX (v.$VERSION)"
-APP=build/BROS-MUX.app
+APP=build.noindex/BROS-MUX.app   # .noindex: Spotlight skips it, so only /Applications shows up in search
 ARCH=arm64
 MACOS_MIN=14.0
-rm -rf build
+rm -rf build build.noindex
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # Whole-module optimization is what Xcode uses for Release builds: the app is compiled as one unit, so generics and

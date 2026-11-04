@@ -12,3 +12,4 @@ dist/
 *.bak
 *_old.icns
 .redesign-go
+build.noindex/

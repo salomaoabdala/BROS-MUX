@@ -8,7 +8,7 @@ import AppKit
 /// Name and version shown in the window title, the welcome screen, the reports and the Finder (build.sh writes the same
 /// version into Info.plist — keep the two in step).
 enum AppInfo {
-    static let version = "1.5"
+    static let version = "1.6"
     static let name = "BROS-MUX (v.\(version))"
 }
 

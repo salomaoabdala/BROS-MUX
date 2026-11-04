@@ -4,7 +4,18 @@ Toda atualização do BROS-MUX é registrada aqui: o que entrou, o que mudou, o 
 
 ## Em desenvolvimento
 
-(nada ainda)
+### Adicionado
+- Aba Mux: vários sons mono PCM (WAVs mono, um por canal, ou os streams mono que o Resolve grava dentro do MOV ProRes) viram UMA faixa multicanal (estéreo, LCR, quad, 5.0, 5.1 ou 7.1) assim que os arquivos são lidos. A lista mostra "PCM 24-bit · 5.1 · 6 mono files/streams", os arquivos de cada canal e a ordem de saída; quem é quem vem dos rótulos de canal gravados nos arquivos, depois dos nomes (`.L.wav`, `_LFE`, `Ls`, `Lss`, `Rsr`…) e, se nada disser, da escuta do ChannelID em segundo plano.
+- Aba Mux: botão "Channels…" na linha do grupo abre a folha de canais com o nome de cada arquivo por canal, correção manual, ordem de saída (SMPTE L R C LFE Ls Rs por padrão) e "Ungroup"; monos que ficaram soltos ganham o aviso "N mono PCM tracks on their own" com o botão "Group into one track".
+- Aba Mux: Align, Sync Viewer e Picture Check tratam o grupo como uma faixa só (a referência de correlação é a soma dos canais sem o LFE) e um único offset corta os mesmos samples inteiros em todos os canais; no Picture Check o grupo toca com todos os canais juntos.
+- Mux: os monos são intercalados num WAV temporário sem recompressão, entram no MP4Box como uma faixa só com os rótulos de canal, e a verificação bit a bit desintercala a faixa final e confere cada canal contra o mono de origem.
+- Linha de comando: o `--job` agrupa os monos do mesmo jeito que a janela.
+- HDR: nível de qualidade "Master" (CRF 10, até 160 Mb/s) para a versão de playback HEVC, acima de "Maximum".
+
+### Mudado
+- Aba Mux: um 5.1 (ou qualquer áudio com mais de 2 canais) dentro do arquivo de vídeo deixa de virar referência de sync sozinho quando chegam áudios soltos; só um guia estéreo ou mono vira. Um 5.1 embutido é entrega, não guia.
+- Zidoo: os textos das checagens falam do Z9X PRO da sala (Realtek RTD1619BPD): H.264 passa a "plays" (confirmado pelo dono no aparelho), VP9 e AV1 ficam "provável, não confirmado", HLG vira aviso, ProRes e codecs de masterização continuam reprovados.
+- `build.sh` gera o app em `build.noindex/` (o Spotlight ignora a pasta, então só a cópia em /Applications aparece na busca); `install.sh` e o README seguem a mudança.
 
 ## v1.5 — 2026-11-03
 

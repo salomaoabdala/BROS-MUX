@@ -245,6 +245,11 @@ struct TrackListView: View {
                             .id("notices")
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 4, leading: DS.margin, bottom: DS.rowGap, trailing: DS.margin))
+                        if !project.busy && project.groupCandidates.count >= 2 {
+                            GroupOffer()
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 0, leading: DS.margin, bottom: DS.rowGap, trailing: DS.margin))
+                        }
                         ForEach($project.tracks) { $t in
                             TrackRow(track: $t, compact: geo.size.width < 990, narrow: geo.size.width < 640)
                         }
@@ -265,9 +270,38 @@ struct TrackListView: View {
     }
 }
 
+/// Mono PCM tracks still on their own: offer to make them one multichannel track (MonoGroup.swift)
+struct GroupOffer: View {
+    @Environment(Project.self) private var project
+
+    var body: some View {
+        let c = project.groupCandidates
+        let problem = Track.groupProblem(c)
+        let color: Color = problem == nil ? .accentColor : .orange
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "rectangle.split.3x1").foregroundStyle(color).padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(c.count) mono PCM tracks on their own").font(.callout.weight(.semibold))
+                Text(problem.map { "Not grouped: \($0)." } ?? "Together they are one \(Probe.channelText(c.count, nil)) sound: one sync offset for all of them, one \(Probe.channelText(c.count, nil)) PCM track in the final file.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if problem == nil {
+                Button("Group into one track") { project.makeGroup(c.map(\.id)) }
+                    .help("Treat these mono tracks as one multichannel sound")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).fill(color.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(color.opacity(0.22), lineWidth: 1))
+    }
+}
+
 struct TrackRow: View {
     @Environment(Project.self) private var project
     @Binding var track: Track
+    @State private var showChannels = false
     /// Narrow list: the fields go under the description. Decided once per list width, not measured per row.
     var compact = false
     /// Narrowest list (inspector open at the window's minimum width): the fields in two rows
@@ -320,6 +354,18 @@ struct TrackRow: View {
             if !track.details.isEmpty { Text(track.details).font(.subheadline).foregroundStyle(.secondary) }
             Text("\(track.url.lastPathComponent) · \(track.imfSegments.isEmpty ? track.sourceLabel : "IMF picture")")
                 .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+            if track.isGroup {
+                Text(track.groupMembersText).font(.caption).foregroundStyle(.tertiary).lineLimit(2).truncationMode(.middle)
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Label { Text(track.groupChannelsText).fixedSize(horizontal: false, vertical: true) } icon: {
+                        Image(systemName: track.listening ? "ear" : "rectangle.split.3x1")
+                    }
+                    .font(.caption).foregroundStyle(track.listening || track.sourceOrder?.isComplete == true ? Color.secondary : Color.orange)
+                    Button("Channels…") { showChannels = true }.controlSize(.small)
+                        .help("Which mono \(track.fromVideoFile ? "stream" : "file") is which channel, the order they are written in, or ungroup them")
+                }
+                .sheet(isPresented: $showChannels) { ChannelOrderSheet(track: $track, onUngroup: { project.ungroup(track.id) }) }
+            }
             if let first = track.imfSegments.first {
                 let frames = track.imfSegments.reduce(0) { $0 + $1.frames }
                 Label("The CPL uses " + (track.imfSegments.count == 1 && first.repeatCount == 1

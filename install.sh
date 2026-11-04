@@ -62,9 +62,9 @@ if [ "$1" != "--build" ] && [ -n "$ZIP" ]; then
   say "Installing the prebuilt app from $ZIP"
   ditto -x -k "$ZIP" "$STAGE"
   SRC=$(find "$STAGE" -maxdepth 2 -name 'BROS-MUX.app' | head -1)
-elif [ "$1" != "--build" ] && [ -d build/BROS-MUX.app ]; then
-  say "Installing the app already built in build/"
-  SRC=build/BROS-MUX.app
+elif [ "$1" != "--build" ] && [ -d build.noindex/BROS-MUX.app ]; then
+  say "Installing the app already built in build.noindex/"
+  SRC=build.noindex/BROS-MUX.app
 else
   if ! xcode-select -p >/dev/null 2>&1 || ! command -v swiftc >/dev/null 2>&1; then
     warn "Building from source needs the Xcode Command Line Tools. Starting their install now;"
@@ -74,7 +74,7 @@ else
   fi
   say "Building the app from source (two or three minutes)"
   ./build.sh
-  SRC=build/BROS-MUX.app
+  SRC=build.noindex/BROS-MUX.app
 fi
 
 [ -d "$SRC" ] || { echo "No BROS-MUX.app to install."; exit 1; }

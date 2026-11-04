@@ -186,8 +186,19 @@ enum ChannelID {
         guard [1, 2, 3, 4, 5, 6, 8].contains(channels), sr >= 8000, info.blockAlign == channels * ((bits + 7) / 8) else { return nil }
         guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? fh.close() }
-
         let total = info.dataSize / info.blockAlign
+        return analyze(channels: channels, sampleRate: sr, bits: bits, total: total, windows: windows, seconds: seconds,
+                       bodyFrom: bodyFrom, bodyTo: bodyTo, cancel: cancel, progress: progress) { start, count in
+            read(fh, info: info, start: start, count: count, channels: channels, bits: bits, float: isFloat)
+        }
+    }
+
+    /// The analysis itself, over any reader of windows (`read(start, count)` → one float array per channel, −1…1):
+    /// a multichannel WAV, or the members of a mono group (MonoGroup.swift)
+    static func analyze(channels: Int, sampleRate sr: Double, bits: Int, total: Int, windows: Int = 40, seconds: Double = 6,
+                        bodyFrom: Double = 0.05, bodyTo: Double = 0.80, cancel: CancelFlag? = nil, progress: (Double) -> Void = { _ in },
+                        read: (Int, Int) -> [[Float]]?) -> Report? {
+        guard [1, 2, 3, 4, 5, 6, 8].contains(channels), sr >= 8000, total > 0 else { return nil }
         let winN = Int(seconds * sr)
         let lo = Int(Double(total) * bodyFrom), hi = Int(Double(total) * bodyTo) - winN
         let count = hi > lo ? min(windows, max(1, (hi - lo) / winN)) : 1
@@ -212,7 +223,7 @@ enum ChannelID {
 
         for (wi, start) in starts.enumerated() {
             if cancel?.isSet == true { return nil }
-            guard let x = read(fh, info: info, start: start, count: winN, channels: channels, bits: bits, float: isFloat) else { return nil }
+            guard let x = read(start, winN), x.count == channels, x.allSatisfy({ $0.count == winN }) else { return nil }
             let nFrames = winN >= win ? (winN - win) / hop + 1 : 0
             var rms = [Double](repeating: 0, count: channels)
             var env = [[Float]](repeating: [Float](repeating: 0, count: nFrames), count: channels)   // speech-band energy per frame (dB)
