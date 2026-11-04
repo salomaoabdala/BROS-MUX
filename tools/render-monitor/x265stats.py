@@ -112,7 +112,16 @@ def allocate(weights, total_bits, cap):
     return [min(w * k, cap) for w in weights]
 
 
-def profile(path, target_mbps, max_mbps, fps, buckets=420, current=None):
+def floor_bits(complexity, floor_qp):
+    """Bits que o frame custaria no piso de qualidade (`qpmax`).
+
+    A passada 1 mediu bits a um QP qualquer; a complexidade ja e
+    bits x qscale, entao os bits em outro QP saem direto da divisao.
+    """
+    return complexity / qscale(floor_qp)
+
+
+def profile(path, target_mbps, max_mbps, fps, buckets=420, current=None, floor_qp=None):
     """Perfil de bitrate estimado ao longo do filme.
 
     Devolve buckets ao longo dos frames ja medidos, as cenas (cortes nos
@@ -149,11 +158,15 @@ def profile(path, target_mbps, max_mbps, fps, buckets=420, current=None):
         if b - a < 2:
             continue
         part = est[a:b]
-        detail.append({
+        row = {
             "start": a,
             "frames": b - a,
             "mbps": round(sum(part) / len(part) * fps / 1e6, 2),
-        })
+        }
+        if floor_qp:
+            fl = [floor_bits(c, floor_qp) for c in comps[a:b]]
+            row["mbps_floor"] = round(sum(fl) / len(fl) * fps / 1e6, 2)
+        detail.append(row)
     ranked = sorted(detail, key=lambda s: s["mbps"])
     now_scene = None
     lag = 0
@@ -175,6 +188,14 @@ def profile(path, target_mbps, max_mbps, fps, buckets=420, current=None):
         "target_mbps": target_mbps,
         "max_mbps": max_mbps,
         "avg_mbps": round(sum(est) / n * fps / 1e6, 2),
+        "floor_qp": floor_qp,
+        # o que o filme inteiro custaria no piso, e quantos frames nem no piso
+        # cabem no teto: e la que o teto aperta, nao no preto
+        "floor_avg_mbps": round(sum(floor_bits(c, floor_qp) for c in comps) / n * fps / 1e6, 1)
+                          if floor_qp else None,
+        "floor_over_cap": (sum(1 for c in comps
+                               if floor_bits(c, floor_qp) * fps / 1e6 > (max_mbps or 1e9))
+                           if floor_qp else None),
         "heaviest": list(reversed(ranked[-5:])),
         "lightest": ranked[:5],
         "cum_bits": None,

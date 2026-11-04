@@ -173,11 +173,22 @@ function bitrateChart(j){
 
 function sceneTables(j){
   const p=j.profile; if(!p) return "";
-  const row=s=>`<tr><td>${tcf(s.start,j.fps_video)}</td><td>${Math.round(s.frames/(j.fps_video||24))} s</td><td><b>${n(s.mbps)}</b> Mbps</td></tr>`;
+  const row=s=>`<tr><td>${tcf(s.start,j.fps_video)}</td><td>${Math.round(s.frames/(j.fps_video||24))} s</td><td><b>${n(s.mbps)}</b> Mbps</td>${s.mbps_floor!==undefined?`<td class="sub">piso ${n(s.mbps_floor,2)}</td>`:""}</tr>`;
+  const floor = p.floor_qp ? `<div class="note">
+      <b>Piso de qualidade: QP ${p.floor_qp}</b> (<code>qpmax=${p.floor_qp}</code>, ligado neste job). É um piso de
+      <b>qualidade</b>, não de bitrate: nenhum frame sai pior que QP ${p.floor_qp}, por mais fácil que a cena seja.
+      Cena fácil gastando pouco não é cena mal codificada — preto é barato.
+      A cena mais leve aqui custaria <b>${n(p.lightest[0] && p.lightest[0].mbps_floor,2)} Mbps</b> no piso, e a estimativa já dá
+      ${n(p.lightest[0] && p.lightest[0].mbps)} Mbps, muito acima dele.
+      O filme inteiro no piso custaria <b>${n(p.floor_avg_mbps)} Mbps</b> de média, e você pediu ${n(p.target_mbps)} —
+      ${n(p.target_mbps/p.floor_avg_mbps,1)}× o piso.
+      ${p.floor_over_cap?`Onde aperta é o outro lado: <b>${p.floor_over_cap.toLocaleString("pt-BR")} frames</b> (${n(100*p.floor_over_cap/p.frames_measured)}% dos medidos)
+      precisariam de mais de ${n(p.max_mbps)} Mbps só para ficar no piso, e o teto não deixa.`:""}
+    </div>` : "";
   return `<div class="two">
     <div><div class="sec">Cenas mais pesadas</div><table>${p.heaviest.map(row).join("")}</table></div>
     <div><div class="sec">Cenas mais leves</div><table>${p.lightest.map(row).join("")}</table></div>
-  </div>`;
+  </div>${floor}`;
 }
 
 function framePane(j){

@@ -32,6 +32,7 @@ PASSP_RE = re.compile(r"[:\s]pass=(\d)")
 BV_RE = re.compile(r"-b:v (\d+)k")
 VBV_RE = re.compile(r"vbv-maxrate=(\d+)")
 NFRAMES_RE = re.compile(r"-frames:v (\d+)")
+QPMAX_RE = re.compile(r"qpmax=(\d+)")
 FPSP_RE = re.compile(r"fps=(\d+)(?:/1)?")
 TOOLS = ("ffmpeg", "MP4Box", "dovi_tool", "mkvmerge", "mkvpropedit", "x265")
 FFMPEG = next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
@@ -138,6 +139,7 @@ def encoder_info(enc):
         "target_mbps": (g(BV_RE, int) or 0) / 1000 or None,
         "max_mbps": (g(VBV_RE, int) or 0) / 1000 or None,
         "frames_total": g(NFRAMES_RE, int),
+        "floor_qp": g(QPMAX_RE, int),
         "fps": g(FPSP_RE, int) or 24,
         "hevc": output_of(enc),
     }
@@ -286,7 +288,8 @@ def profile_cached(info, current, now):
     if c and now - c["t"] < 8:
         return c["p"]
     p = x265stats.profile(stats, info["target_mbps"], info.get("max_mbps"),
-                          info.get("fps") or 24, current=current)
+                          info.get("fps") or 24, current=current,
+                          floor_qp=info.get("floor_qp"))
     if p:  # nunca guardar um resultado vazio: a passada 1 ainda pode nao ter gravado nada
         _profile_cache[stats] = {"t": now, "p": p}
     return p
@@ -357,6 +360,7 @@ def build_job(proc, now):
         "target_mbps": info.get("target_mbps"),
         "max_mbps": info.get("max_mbps"),
         "fps_video": info.get("fps") or 24,
+        "floor_qp": info.get("floor_qp"),
         "frame_src": "log",
         "profile": None,
         "fps_typical": None,
