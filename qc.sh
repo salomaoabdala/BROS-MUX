@@ -27,7 +27,7 @@ cd "$(dirname "$0")"
 OUT=qc/out; REF=qc/reference; CLIPS=$OUT/clips; SHOTS=$OUT/shots; LOGS=$OUT/logs
 APP=build.noindex/BROS-MUX.app; BIN=$APP/Contents/MacOS/BROS-MUX
 REPORT=$OUT/QC-REPORT.txt
-CLIPGEN=2                      # suba quando os clipes de teste mudarem: eles são gerados de novo
+CLIPGEN=3                      # suba quando os clipes de teste mudarem: eles são gerados de novo
 mkdir -p "$CLIPS" "$LOGS" "$OUT/mux" "$OUT/transcode"
 rm -rf "$OUT/previous"; [[ -d $SHOTS ]] && mv "$SHOTS" "$OUT/previous"
 mkdir -p "$SHOTS"
@@ -77,6 +77,8 @@ R=$CLIPS/ref.wav                                       # the same pink noise is 
 [[ -f $CLIPS/h264_709.mov ]] || $FF -f lavfi -i "$VSRC" -i "$R" -t 12 -vf "format=yuv420p,$T709" -c:v libx264 -preset ultrafast -crf 18 -c:a pcm_s24le -timecode 01:00:00:00 "$CLIPS/h264_709.mov"
 [[ -f $CLIPS/prores4444_alpha.mov ]] || $FF -f lavfi -i "$VSRC" -i "$R" -t 12 -vf "format=yuva444p10le,$T709" -c:v prores_ks -profile:v 4 -pix_fmt yuva444p10le -vendor apl0 -c:a pcm_s24le -timecode 01:00:00:00 "$CLIPS/prores4444_alpha.mov"
 [[ -f $CLIPS/hevc10_pq2020.mov ]] || $FF -f lavfi -i "$VSRC" -i "$R" -t 5 -pix_fmt yuv420p10le -c:v libx265 -preset ultrafast -crf 18 -x265-params "log-level=error:hdr10=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400" -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -tag:v hvc1 -c:a pcm_s24le -timecode 01:00:00:00 "$CLIPS/hevc10_pq2020.mov"
+TP3="setparams=color_primaries=smpte432:color_trc=smpte2084:colorspace=bt709:range=tv"
+[[ -f $CLIPS/prores4444_p3pq.mov ]] || $FF -f lavfi -i "$VSRC" -i "$R" -t 5 -vf "format=yuv444p10le,$TP3" -c:v prores_ks -profile:v 4 -pix_fmt yuv444p10le -vendor apl0 -color_primaries smpte432 -color_trc smpte2084 -colorspace bt709 -color_range tv -c:a pcm_s24le -timecode 01:00:00:00 "$CLIPS/prores4444_p3pq.mov"
 [[ -f $CLIPS/guide.wav ]] || cp "$R" "$CLIPS/guide.wav"
 [[ -f $CLIPS/guide_late100ms.wav ]] || $FF -i "$R" -af "adelay=100|100" -c:a pcm_s24le "$CLIPS/guide_late100ms.wav"
 typeset -A GAIN; GAIN=(L 1.0 R 1.0 C 0.7 Ls 0.5 Rs 0.5)
@@ -88,9 +90,9 @@ for ch in L R C LFE Ls Rs; do
   fi
   MONOS+=(--add "$CLIPS/tone.$ch.wav")
 done
-n=0; for f in ref.wav h264_709.mov prores4444_alpha.mov hevc10_pq2020.mov guide.wav guide_late100ms.wav tone.L.wav tone.R.wav tone.C.wav tone.LFE.wav tone.Ls.wav tone.Rs.wav; do [[ -s $CLIPS/$f ]] && (( n++ )); done
-if (( n == 12 )); then print -r -- "$CLIPGEN" > "$CLIPS/.gen"; pass "Clipes de teste: 3 vídeos (H.264 Rec.709 e ProRes 4444 alfa de 12 s, HEVC 10-bit PQ/BT.2020 de 5 s), 2 guias estéreo e 6 monos"
-else fail "Clipes de teste: só $n de 12 existem em $CLIPS"; finish; fi
+n=0; for f in ref.wav h264_709.mov prores4444_alpha.mov hevc10_pq2020.mov prores4444_p3pq.mov guide.wav guide_late100ms.wav tone.L.wav tone.R.wav tone.C.wav tone.LFE.wav tone.Ls.wav tone.Rs.wav; do [[ -s $CLIPS/$f ]] && (( n++ )); done
+if (( n == 13 )); then print -r -- "$CLIPGEN" > "$CLIPS/.gen"; pass "Clipes de teste: 4 vídeos (H.264 Rec.709 e ProRes 4444 alfa de 12 s, HEVC 10-bit PQ/BT.2020 e ProRes 4444 P3-D65/PQ de 5 s), 2 guias estéreo e 6 monos"
+else fail "Clipes de teste: só $n de 13 existem em $CLIPS"; finish; fi
 
 # 3. Mux --------------------------------------------------------------------------------------------------------
 L=$LOGS/mux_stereo.txt; rm -f "$OUT/mux/stereo.mov"
@@ -121,6 +123,22 @@ GOT=$(grep '^COMMAND:' "$L" | sed -E 's#^COMMAND: ##; s#(-i) [^ ]+#\1 INPUT#; s#
 if [[ -n $GOT && $GOT == "$(cat "$REF/dv-command.txt")" ]]; then
   pass "Comando ffmpeg/x265 do encode HDR/Dolby Vision idêntico à referência (qc/reference/dv-command.txt)"
 else fail "Comando ffmpeg/x265 do encode HDR/Dolby Vision mudou em relação à referência:"; say "  ref: $(cat "$REF/dv-command.txt")"; say "  got: ${GOT:-nenhum}"; fi
+
+# um master P3-D65 (como o 2DIE4) tem de sair BT.2020, e o app tem de dizer que converteu
+tags() { echo "$(probe v:0 color_primaries "$1")/$(probe v:0 color_space "$1")/$(probe v:0 color_transfer "$1")/$(probe v:0 chroma_location "$1")" }
+L=$LOGS/mux_hdr_p3.txt; rm -f "$OUT/mux/hdr_p3.mp4"
+"$BIN" --job -o "$OUT/mux/hdr_p3.mp4" --video "$CLIPS/prores4444_p3pq.mov" --encode --quality maximum --speed slow > "$L" 2>&1
+T=$(tags "$OUT/mux/hdr_p3.mp4")
+if grep -q '^RESULT.*: ok' "$L" && grep -q 'lut3d=file=' "$L" && grep -q 'converted in linear light' "$L" && [[ $T == "bt2020/bt2020nc/smpte2084/topleft" ]]; then
+  pass "Encode HDR10 de fonte P3-D65: convertida para BT.2020 (lut3d no comando, tags $T, chroma siting top-left, o log diz que converteu)"
+else fail "Encode HDR10 de fonte P3-D65: tags ${T:-?} (esperado bt2020/bt2020nc/smpte2084/topleft) (veja $L)"; fi
+# ... e com a conversão desligada ele sai como veio, mas AVISA — nunca em silêncio
+L=$LOGS/mux_hdr_p3_keep.txt; rm -f "$OUT/mux/hdr_p3_keep.mp4"
+"$BIN" --job -o "$OUT/mux/hdr_p3_keep.mp4" --video "$CLIPS/prores4444_p3pq.mov" --encode --quality maximum --speed slow --keep-source-primaries > "$L" 2>&1
+T=$(tags "$OUT/mux/hdr_p3_keep.mp4")
+if grep -q '^RESULT.*: ok' "$L" && grep -q 'WARNING: The source is P3-D65' "$L" && [[ $T == smpte432/bt709/smpte2084/* ]]; then
+  pass "Encode HDR10 com --keep-source-primaries: sai como veio (tags $T) e o log avisa que está fora da convenção HDR10"
+else fail "Encode HDR10 com --keep-source-primaries: tags ${T:-?}, aviso $(grep -c 'WARNING: The source is P3-D65' "$L") (veja $L)"; fi
 
 # 4. Transcode --------------------------------------------------------------------------------------------------
 for clip in prores4444_alpha hevc10_pq2020 h264_709; do
