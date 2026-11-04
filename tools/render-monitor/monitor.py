@@ -264,7 +264,12 @@ def build_job(proc, now):
         if st and st not in first_seen:
             first_seen[st] = s["t"]
 
-    rate = job["fps_now"] or job["fps_avg"]
+    # ritmo para o tempo restante: mediana do fps recente (estavel), senao o de agora
+    recent = sorted(h["fps"] for h in job["fps_history"][-8:])
+    if len(recent) >= 3:
+        rate = recent[len(recent) // 2]
+    else:
+        rate = job["fps_now"] or job["fps_avg"]
     starts = {}
     for st in order:
         if st in first_seen:
