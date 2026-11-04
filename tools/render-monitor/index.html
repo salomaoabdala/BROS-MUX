@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BROS-MUX — Monitor de render</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --surface:#ffffff; --surface-2:#f0f2f5; --line:#e3e6ea;
+    --ink:#16181d; --ink-2:#5b6472; --ink-3:#8b94a3;
+    --accent:#2a6df4; --accent-soft:#dbe6fe;
+    --good:#1a7f45; --warn:#9a5b00; --crit:#b4232a;
+    --track:#e6e9ee;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0e1116; --surface:#161b22; --surface-2:#1d232c; --line:#2a313b;
+      --ink:#e9edf3; --ink-2:#a5b0c0; --ink-3:#74808f;
+      --accent:#6f9cff; --accent-soft:#1e2c4a;
+      --good:#4fc07c; --warn:#e2a33c; --crit:#f0666d;
+      --track:#242b35;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+       padding:20px 16px 40px}
+  .wrap{max-width:1080px;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-bottom:18px}
+  h1{font-size:19px;margin:0;letter-spacing:-.01em}
+  .sub{color:var(--ink-2);font-size:12.5px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);display:inline-block;
+       margin-right:6px;vertical-align:1px}
+  .dot.off{background:var(--ink-3)}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;
+        padding:18px;margin-bottom:16px}
+  .card h2{font-size:15.5px;margin:0 0 2px;letter-spacing:-.01em;word-break:break-all}
+  .path{color:var(--ink-3);font-size:11.5px;word-break:break-all;margin-bottom:14px}
+  .hero{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-bottom:6px}
+  .pct{font-size:44px;font-weight:650;line-height:1;letter-spacing:-.03em;
+       font-variant-numeric:tabular-nums}
+  .pct span{font-size:18px;font-weight:500;color:var(--ink-2)}
+  .herolab{color:var(--ink-2);font-size:12.5px;padding-bottom:4px}
+  .bar{height:10px;background:var(--track);border-radius:5px;overflow:hidden;margin:12px 0 4px;
+       display:flex;gap:2px}
+  .bar i{display:block;background:var(--accent);height:100%;border-radius:5px}
+  .bar i.ghost{background:var(--accent-soft)}
+  .barlab{display:flex;justify-content:space-between;color:var(--ink-3);font-size:11.5px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:1px;
+        background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden;
+        margin:16px 0}
+  .kpi{background:var(--surface);padding:11px 13px}
+  .kpi b{display:block;font-size:21px;font-weight:620;letter-spacing:-.02em;
+         font-variant-numeric:tabular-nums}
+  .kpi small{display:block;color:var(--ink-2);font-size:11.5px;margin-top:2px}
+  .kpi em{font-style:normal;font-size:13px;color:var(--ink-3);font-weight:500}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--ink-3);font-weight:500;font-size:11.5px;
+     text-transform:uppercase;letter-spacing:.04em;padding:0 8px 6px 0}
+  td{padding:7px 8px 7px 0;border-top:1px solid var(--line);vertical-align:top;
+     font-variant-numeric:tabular-nums}
+  td.name{font-variant-numeric:normal}
+  .tag{font-size:11px;padding:2px 7px;border-radius:999px;background:var(--surface-2);
+       color:var(--ink-2);white-space:nowrap}
+  .tag.now{background:var(--accent-soft);color:var(--accent)}
+  .tag.done{color:var(--good)}
+  .sec{font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3);
+       margin:18px 0 8px}
+  .empty{color:var(--ink-2);padding:8px 0}
+  svg .grid{stroke:var(--line);stroke-width:1}
+  svg .line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  svg text{fill:var(--ink-3);font-size:10.5px}
+  .note{color:var(--warn);font-size:12.5px;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>BROS-MUX — Monitor de render</h1>
+    <div class="sub" id="meta">conectando…</div>
+  </header>
+  <div id="jobs"></div>
+  <div class="sec">Sessões de render abertas</div>
+  <div class="card" id="sessions"></div>
+  <div class="sub" id="foot"></div>
+</div>
+<script>
+const $ = (s,r=document)=>r.querySelector(s);
+
+function hms(s){
+  if(s==null||!isFinite(s)) return "—";
+  s=Math.max(0,Math.round(s));
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  if(h) return h+" h "+String(m).padStart(2,"0")+" min";
+  if(m) return m+" min "+String(x).padStart(2,"0")+" s";
+  return x+" s";
+}
+function clock(t){
+  if(!t) return "—";
+  return new Date(t*1000).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+}
+function n(v,d=1){ return v==null?"—":v.toLocaleString("pt-BR",{minimumFractionDigits:d,maximumFractionDigits:d}); }
+function int(v){ return v==null?"—":v.toLocaleString("pt-BR"); }
+function gb(b){ return b==null?"—":(b/1e9).toFixed(2).replace(".",",")+" GB"; }
+
+function spark(hist){
+  if(!hist || hist.length<2) return '<div class="empty">Juntando amostras do fps… (um ponto a cada 30 s)</div>';
+  const W=640,H=110,P=26;
+  const fps=hist.map(p=>p.fps), t0=hist[0].t, t1=hist[hist.length-1].t;
+  const lo=Math.min(...fps)*0.85, hi=Math.max(...fps)*1.1;
+  const x=p=>P+(p.t-t0)/Math.max(1,(t1-t0))*(W-P-8);
+  const y=p=>H-18-(p.fps-lo)/Math.max(.001,(hi-lo))*(H-34);
+  const d=hist.map((p,i)=>(i?"L":"M")+x(p).toFixed(1)+","+y(p).toFixed(1)).join(" ");
+  const dots=hist.map(p=>`<circle cx="${x(p).toFixed(1)}" cy="${y(p).toFixed(1)}" r="7" fill="transparent"><title>${p.fps.toFixed(1)} fps às ${clock(p.t)}</title></circle>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="fps ao longo do tempo">
+    <line class="grid" x1="${P}" y1="${H-18}" x2="${W-8}" y2="${H-18}"/>
+    <text x="0" y="20">${hi.toFixed(0)}</text><text x="0" y="${H-14}">${lo.toFixed(0)}</text>
+    <path class="line" d="${d}"/>${dots}
+    <text x="${P}" y="${H-4}">${clock(t0)}</text>
+    <text x="${W-8}" y="${H-4}" text-anchor="end">${clock(t1)}</text>
+  </svg>`;
+}
+
+function jobCard(j,now){
+  const pct = j.pct_total!=null?j.pct_total:(j.pct_stage||0);
+  const passTxt = j.pass_no?`passada ${j.pass_no} de ${j.pass_of}`:"";
+  const segs = (()=>{
+    if(!j.pass_of) return `<i style="flex:${pct}"></i><i class="ghost" style="flex:${100-pct}"></i>`;
+    const each=100/j.pass_of, done=j.frame/j.frames*each;
+    let h="";
+    for(let p=1;p<=j.pass_of;p++){
+      const f = p<j.pass_no?each : p===j.pass_no?done : 0;
+      h+=`<i style="flex:${f.toFixed(2)}"></i>`;
+      const rest = p<j.pass_no?0 : p===j.pass_no?each-done : each;
+      h+=`<i class="ghost" style="flex:${rest.toFixed(2)}"></i>`;
+    }
+    return h;
+  })();
+  const stages = j.stages.map(s=>`<tr>
+      <td class="name">${s.name}</td>
+      <td>${clock(s.start)}${s.estimated?' <span class="tag">estimado</span>':''}</td>
+      <td>${hms(s.elapsed)}</td>
+      <td><span class="tag ${s.state==='atual'?'now':'done'}">${s.state}</span></td>
+    </tr>`).join("");
+  const slow = j.fps_now && j.fps_avg && j.fps_now < j.fps_avg*0.8
+    ? `<div class="note">O fps de agora (${n(j.fps_now)}) está abaixo da média da passada (${n(j.fps_avg)}): a cena atual é mais pesada, ou a máquina/disco estão disputados. O tempo restante aqui já usa o fps de agora.</div>` : "";
+  return `<div class="card">
+    <h2>${j.title}</h2>
+    <div class="path">${j.output||""} · pid ${j.pid} · log ${j.log||"—"}</div>
+    <div class="hero">
+      <div class="pct">${n(pct)}<span>%</span></div>
+      <div class="herolab">do trabalho inteiro${passTxt?" · "+passTxt:""}<br>${j.stage||""}</div>
+    </div>
+    <div class="bar">${segs}</div>
+    <div class="barlab"><span>início ${clock(j.started)}</span><span>frame ${int(j.frame)} de ${int(j.frames)}</span></div>
+    <div class="kpis">
+      <div class="kpi"><b>${n(j.fps_now)}</b><small>fps agora (90 s)</small></div>
+      <div class="kpi"><b>${n(j.fps_avg)}</b><small>fps médio da passada</small></div>
+      <div class="kpi"><b><em>${hms(j.elapsed)}</em></b><small>decorrido no trabalho</small></div>
+      <div class="kpi"><b><em>${hms(j.eta_stage)}</em></b><small>falta nesta passada</small></div>
+      <div class="kpi"><b><em>${hms(j.eta_total)}</em></b><small>falta até o fim</small></div>
+      <div class="kpi"><b><em>${j.eta_total?clock(now+j.eta_total):"—"}</em></b><small>término previsto</small></div>
+    </div>
+    ${spark(j.fps_history)}
+    ${slow}
+    <div class="sec">Tempo decorrido em cada etapa</div>
+    <table><thead><tr><th>Etapa</th><th>Começou</th><th>Durou</th><th>Estado</th></tr></thead>
+    <tbody>${stages||'<tr><td class="name">—</td><td>—</td><td>—</td><td>—</td></tr>'}</tbody></table>
+    ${j.partial?`<div class="barlab" style="margin-top:12px"><span>arquivo parcial: ${j.partial.name}</span><span>${gb(j.partial.bytes)}</span></div>`:""}
+  </div>`;
+}
+
+async function tick(){
+  let s;
+  try{ s = await (await fetch("/status.json",{cache:"no-store"})).json(); }
+  catch(e){ $("#meta").innerHTML = '<span class="dot off"></span>monitor fora do ar'; return; }
+  const run = s.jobs.length>0;
+  $("#meta").innerHTML = `<span class="dot ${run?"":"off"}"></span>${s.host} · ${s.chip} · ${s.cores} núcleos · carga ${s.load[0]} · ${run?s.jobs.length+" render rodando":"nenhum render rodando"}`;
+  $("#jobs").innerHTML = run ? s.jobs.map(j=>jobCard(j,s.now)).join("")
+    : '<div class="card empty">Nenhum job do BROS-MUX rodando agora. A página se atualiza sozinha quando um começar.</div>';
+  const rows = [
+    ...s.jobs.map(j=>({n:"Render (linha de comando) — "+j.title, pid:j.pid, st:j.started, el:j.elapsed, cpu:j.cpu})),
+    ...s.apps.map(a=>({n:"BROS-MUX (app aberto)", pid:a.pid, st:null, el:null, cpu:a.cpu}))
+  ];
+  $("#sessions").innerHTML = rows.length? `<table>
+      <thead><tr><th>Sessão</th><th>pid</th><th>Começou</th><th>Decorrido</th><th>CPU</th></tr></thead>
+      <tbody>${rows.map(r=>`<tr><td class="name">${r.n}</td><td>${r.pid}</td><td>${clock(r.st)}</td><td>${hms(r.el)}</td><td>${r.cpu?Math.round(r.cpu)+"%":"—"}</td></tr>`).join("")}</tbody></table>`
+    : '<div class="empty">Nada do BROS-MUX aberto.</div>';
+  $("#foot").textContent = "Atualizado às "+clock(s.now)+" · a página se atualiza a cada 3 s · só leitura, não interfere no render.";
+}
+tick(); setInterval(tick,3000);
+</script>
+</body>
+</html>

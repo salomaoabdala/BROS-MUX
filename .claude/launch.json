@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "render-monitor",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["tools/render-monitor/monitor.py"],
+      "port": 8787
+    }
+  ]
+}
