@@ -4,7 +4,7 @@ Toda atualização do BROS-MUX é registrada aqui: o que entrou, o que mudou, o 
 
 ## Em desenvolvimento
 
-(nada ainda)
+- `qc.sh`: controle de qualidade automático antes de publicar — compila, confere a versão (build.sh, Design.swift, Info.plist, CHANGELOG), gera clipes de teste, roda o Mux com verificação bit a bit (guia estéreo, grupo de 6 monos, encode HDR10 com o comando ffmpeg/x265 conferido contra `qc/reference/dv-command.txt`), o Transcode de cada preset em cada clipe conferido com ffprobe, capturas de cada aba e a abertura do app; escreve `qc/out/QC-REPORT.txt`. A regra (nada é publicado no GitHub nem no `main` sem o QC aprovado) está no `CLAUDE.md`.
 
 ## v1.6 — 2026-11-04
 

@@ -13,3 +13,6 @@ dist/
 *_old.icns
 .redesign-go
 build.noindex/
+
+# QC output (clips, muxes, transcodes, screenshots, report)
+qc/out/

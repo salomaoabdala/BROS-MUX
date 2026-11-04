@@ -50,6 +50,14 @@ A tela inicial do app mostra cada engine com a versão instalada; o que faltar a
 
 Gera `build.noindex/BROS-MUX.app` só para Apple Silicon (arm64, whole-module optimization) com `swiftc`, sem Xcode project — não há fatia Intel, de propósito, e o Info.plist declara `LSRequiresNativeExecution`, então o app nunca roda via Rosetta. A versão fica em `VERSION` no `build.sh` e em `AppInfo.version` no `Design.swift`.
 
+Antes de publicar uma versão, o controle de qualidade:
+
+```bash
+./qc.sh
+```
+
+Compila, confere a versão, gera clipes de teste e roda o Mux (verificação bit a bit, grupo de 6 monos, encode HDR com o comando ffmpeg/x265 conferido contra `qc/reference/dv-command.txt`), o Transcode de cada preset em cada clipe (conferido com ffprobe), capturas de cada aba e a abertura do app. O relatório fica em `qc/out/QC-REPORT.txt` e as capturas em `qc/out/shots` (as da rodada anterior em `qc/out/previous`, para comparar). Nada é publicado no GitHub nem no `main` com o QC reprovado; a regra completa está no `CLAUDE.md`.
+
 ## Linha de comando
 
 O binário dentro do app aceita alguns comandos sem interface:

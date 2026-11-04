@@ -15,16 +15,25 @@ Regra fixa do projeto, pedida pelo dono. Vale para toda versão nova, sem exceç
 
 ## Como uma atualização é feita e publicada
 
-Regra do dono (2026-11-04): ele pede as mudanças, o Claude faz tudo de uma vez e publica, sem ficar perguntando a cada passo.
+Regra do dono (2026-11-04): ele pede as mudanças, o Claude faz tudo de uma vez, roda o controle de qualidade (QC) e, só se ele passar, publica no GitHub e no `main`, sem ficar perguntando a cada passo.
 
-1. **Juntar tudo numa versão só** e implementar de uma vez. Perguntar só o que muda o resultado e não dá para decidir sozinho; nunca pedir confirmação para compilar, commitar, dar push ou publicar.
-2. **Compilar e testar**: `./build.sh` (só Apple Silicon), os testes do que mudou, e instalar em `/Applications` (`rm -rf /Applications/BROS-MUX.app && ditto build.noindex/BROS-MUX.app /Applications/BROS-MUX.app`).
-3. **Assim que a compilação terminar e os testes passarem, publicar o update no GitHub**, sem pedir autorização:
+1. **Juntar tudo numa versão só** e implementar de uma vez. Perguntar só o que muda o resultado e não dá para decidir sozinho; nunca pedir confirmação para compilar, testar, commitar, dar push ou publicar.
+2. **Compilar**: `./build.sh` (só Apple Silicon).
+3. **QC antes de publicar, sempre.** A parte automática é `./qc.sh` (compila, roda os testes abaixo e escreve `qc/out/QC-REPORT.txt`); a parte manual é olhar. Nada novo pode ter quebrado o que funcionava, e nada pode ter piorado:
+   - o app compila; `VERSION` (build.sh), `AppInfo.version` (Design.swift) e a entrada do CHANGELOG batem;
+   - Mux: mux de teste com a verificação bit a bit passando (áudio solto, grupo de monos, encode HDR), e o comando ffmpeg/x265 do encode Dolby Vision de uma fonte PQ/BT.2020 idêntico à referência `qc/reference/dv-command.txt`;
+   - Transcode: cada preset em cada clipe de teste (ProRes 4444 com alfa, HEVC 10-bit PQ/BT.2020, H.264 Rec.709), conferido com ffprobe (codec, frames, fps, tags de cor);
+   - capturas (`--snapshot`) de cada aba, olhadas uma a uma e comparadas com as da versão anterior (`qc/out/previous/`): nada cortado, sumido, sobreposto ou pior;
+   - abrir o app instalado e passar pelos fluxos que a versão tocou (abrir arquivos, botões e painéis novos), conferindo usabilidade e textos;
+   - no que mudou, comparar antes e depois com dados reais, nunca por inferência.
+   Um item falhou → corrigir e rodar o QC de novo. Nada é publicado com QC reprovado; se não der para corrigir, dizer ao dono o que falhou e não publicar.
+4. **Instalar** em `/Applications` (`rm -rf /Applications/BROS-MUX.app && ditto build.noindex/BROS-MUX.app /Applications/BROS-MUX.app`).
+5. **Publicar no GitHub e no `main`**, só com o QC aprovado e sem pedir autorização:
    - commit `v1.x: resumo` e push do branch de trabalho;
+   - `main` na versão publicada: `git push origin <branch>:main` (fast-forward; se não der, merge e push), para a página inicial do repositório mostrar a versão nova;
    - zip do app: `ditto -c -k --keepParent build.noindex/BROS-MUX.app dist/BROS-MUX-v1.x.zip`;
-   - tag `v1.x` e Release "BROS-MUX v1.x" (`gh release create`) com o zip e notas em português tiradas do `CHANGELOG.md`: uma linha de resumo, os itens principais e, no fim, "Instalar: baixe o zip, descompacte e arraste o BROS-MUX.app para /Applications (ou `./install.sh` depois do `git pull`)." O `install.sh` baixa sempre o Release mais recente;
-   - merge no `main` só quando o dono disser (a Release pode sair do branch de trabalho).
-4. **Na resposta**, listar o que entrou, mudou e foi corrigido, igual ao `CHANGELOG.md`, com o link da Release.
+   - tag `v1.x` e Release "BROS-MUX v1.x" (`gh release create`) com o zip e notas em português tiradas do `CHANGELOG.md`: uma linha de resumo, os itens principais, "Requer um Mac com Apple Silicon…" e, no fim, "Instalar: baixe o zip, descompacte e arraste o BROS-MUX.app para /Applications (ou `./install.sh` depois do `git pull`)." O `install.sh` baixa sempre o Release mais recente.
+6. **Na resposta**, listar o que entrou, mudou e foi corrigido, igual ao `CHANGELOG.md`, o resultado do QC e o link da Release.
 
 ## Regras do app
 
