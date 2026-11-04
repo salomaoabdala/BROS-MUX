@@ -9,6 +9,7 @@ render: so le `ps` e o log do job.
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +34,8 @@ VBV_RE = re.compile(r"vbv-maxrate=(\d+)")
 NFRAMES_RE = re.compile(r"-frames:v (\d+)")
 FPSP_RE = re.compile(r"fps=(\d+)(?:/1)?")
 TOOLS = ("ffmpeg", "MP4Box", "dovi_tool", "mkvmerge", "mkvpropedit", "x265")
+FFMPEG = next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
+                           shutil.which("ffmpeg") or "") if p and os.path.exists(p)), "ffmpeg")
 FRAME_MIN_INTERVAL = 12  # s entre duas extracoes de miniatura
 SCRIPT_RE = re.compile(r"^script (?:-\w+ )*(\S+\.log)\b")
 
@@ -529,7 +532,7 @@ def grab_frame(pid, source, frame, fps):
         return out
     _frame_cache[pid] = {"t": now, "frame": frame}
     r = subprocess.run([
-        "ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
+        FFMPEG, "-nostdin", "-v", "error", "-threads", "1",
         "-ss", "%.3f" % (frame / float(fps or 24)), "-i", source,
         "-frames:v", "1", "-vf",
         "scale=640:-2,format=yuv420p,curves=all=0/0 0.2/0.45 0.5/0.78 1/1,"
