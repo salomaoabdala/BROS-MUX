@@ -128,8 +128,8 @@ enum Tools {
 
 enum Fmt {
     static func bitrate(_ bps: Double) -> String {
-        if bps >= 1_000_000 { return String(format: "%.1f Mb/s", bps / 1_000_000) }
-        return String(format: "%.0f kb/s", bps / 1000)
+        if bps >= 1_000_000 { return String(format: "%.1f Mbps", bps / 1_000_000) }
+        return String(format: "%.0f kbps", bps / 1000)
     }
     static func bytes(_ b: Double) -> String {
         let f = ByteCountFormatter(); f.countStyle = .file
@@ -1505,10 +1505,10 @@ enum Academy {
             }
             if let br = v.d("BitRate") {
                 if isAVC {
-                    if uhd { c.append(Check(level: br >= 75e6 && br <= 125e6 ? .ok : .warn, title: "Video bitrate", detail: "\(Fmt.bitrate(br)) (H.264 UHD: VBR expected between 80 and 120 Mb/s)")) }
-                    else { c.append(Check(level: br >= 38e6 ? .ok : .warn, title: "Video bitrate", detail: "\(Fmt.bitrate(br)) (H.264 HD: 40 Mb/s or higher)")) }
+                    if uhd { c.append(Check(level: br >= 75e6 && br <= 125e6 ? .ok : .warn, title: "Video bitrate", detail: "\(Fmt.bitrate(br)) (H.264 UHD: VBR expected between 80 and 120 Mbps)")) }
+                    else { c.append(Check(level: br >= 38e6 ? .ok : .warn, title: "Video bitrate", detail: "\(Fmt.bitrate(br)) (H.264 HD: 40 Mbps or higher)")) }
                 } else {
-                    c.append(Check(level: .info, title: "Video bitrate", detail: "\(Fmt.bitrate(br)) (ProRes 422 HQ: ~\(uhd ? "880" : "220") Mb/s expected)"))
+                    c.append(Check(level: .info, title: "Video bitrate", detail: "\(Fmt.bitrate(br)) (ProRes 422 HQ: ~\(uhd ? "880" : "220") Mbps expected)"))
                 }
             }
             if let b = black {
@@ -2401,7 +2401,7 @@ final class Project {
     /// own colour and the Dolby Vision / HDR10+ metadata — built on the same TranscodePlan the Transcode tab uses.
     var encodePlan: TranscodePlan? {
         guard hdr.encode, let v = videoTrack, let src = v.source else { return nil }
-        var p = TranscodePlan(source: src, video: .hevc(quality: hdr.quality, speed: hdr.speed))
+        var p = TranscodePlan(source: src, video: .hevc(quality: hdr.quality, speed: hdr.speed, rate: hdr.rate))
         p.segments = v.imfSegments.isEmpty
             ? [.init(file: v.url, start: 0, count: videoFrames)]
             : v.imfSegments.flatMap { r in Array(repeating: TranscodePlan.Segment(file: r.file, start: r.entryPoint, count: r.duration), count: r.repeatCount) }
@@ -3157,6 +3157,10 @@ struct CLIArgs {
     var hdr10plus: String?
     var quality: String?
     var speed: String?
+    var rate: String?                    // --rate crf|2pass|cbr
+    var mbps: Int?                       // --mbps: the average (2pass) or the constant bitrate (cbr)
+    var maxMbps: Int?                    // --max-mbps: the peak of the 2-pass encode
+    var floor = true                     // --no-floor turns the quality floor off
     var refLateFrames = 0.0
     var channelOrder: String?            // "--channel-order \"L C R Ls Rs LFE\"": listen to each PCM track and write its channels in this order
     var pictureCheck = true
@@ -3188,6 +3192,10 @@ struct CLIArgs {
             case "--hdr10plus": hdr10plus = next()
             case "--quality": quality = next()
             case "--speed": speed = next()
+            case "--rate": rate = next()
+            case "--mbps": mbps = Int(next() ?? "")
+            case "--max-mbps": maxMbps = Int(next() ?? "")
+            case "--no-floor": floor = false
             case "--ref-late-frames": refLateFrames = Double(next() ?? "") ?? 0
             case "--channel-order": channelOrder = next()
             case "--no-picture-check": pictureCheck = false
@@ -3236,6 +3244,9 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
     if a.encode { project.hdr.encode = true }
     if let q = a.quality.flatMap({ HDRSettings.Quality(rawValue: $0) }) { project.hdr.quality = q }
     if let s = a.speed.flatMap({ HDRSettings.Speed(rawValue: $0) }) { project.hdr.speed = s }
+    if let r = HDRSettings.Rate.fromCLI(mode: a.rate.flatMap(HDRSettings.RateMode.named), mbps: a.mbps, maxMbps: a.maxMbps, floor: a.floor) {
+        project.hdr.rateMode = r.mode; project.hdr.bitratePreset = .custom; project.hdr.customMbps = r.targetMbps; project.hdr.customMaxMbps = r.maxMbps; project.hdr.qualityFloor = r.floor
+    }
     if let d = a.dv {
         // like dropping the XML on the window: the re-encoding switches itself on, and says so
         let u = URL(fileURLWithPath: d)
@@ -3304,7 +3315,7 @@ func runJobCLI(_ args: [String]) -> Int32 {
     let a = CLIArgs(args)
     // never fall back to a default destination from the command line — an explicit -o is required
     guard let o = a.output, ["mov", "mp4", "mkv"].contains((o as NSString).pathExtension.lowercased()) else {
-        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft] (an explicit -o is required)"); return 2
+        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft --rate crf|2pass|cbr --mbps N --max-mbps N --no-floor] (an explicit -o is required)"); return 2
     }
     let project = buildProject(a, output: a.output)
     print("\nTRACKS:")
@@ -3465,6 +3476,10 @@ func snapshot(_ args: [String]) {
         let m = TranscodeModel.shared
         m.clear()
         if let p = value("--to").flatMap(TranscodePreset.named) { m.preset = p }
+        if let r = HDRSettings.Rate.fromCLI(mode: value("--rate").flatMap(HDRSettings.RateMode.named), mbps: value("--mbps").flatMap { Int($0) },
+                                           maxMbps: value("--max-mbps").flatMap { Int($0) }, floor: !args.contains("--no-floor")) {
+            m.hdr.rateMode = r.mode; m.hdr.bitratePreset = .custom; m.hdr.customMbps = r.targetMbps; m.hdr.customMaxMbps = r.maxMbps; m.hdr.qualityFloor = r.floor
+        }
         m.add([URL(fileURLWithPath: f)])
         let until = Date().addingTimeInterval(60)
         while m.loading > 0 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }

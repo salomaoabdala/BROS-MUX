@@ -500,10 +500,10 @@ final class HDRSettings {
         var averageMbps: Double { switch self { case .master: return 100; case .maximum: return 60; case .high: return 40; case .compact: return 22 } }
         var detail: String {
             switch self {
-            case .master: return "≈ 50–160 Mb/s (CRF 4; about 100 Mb/s on the 2DIE4 master), well above a UHD Blu-ray — as close to the master as a player can play (Level 5.1 High tier)"
-            case .maximum: return "≈ 40–90 Mb/s, like a UHD Blu-ray"
-            case .high: return "≈ 30–60 Mb/s, above the best streaming"
-            case .compact: return "≈ 15–35 Mb/s, like 4K streaming"
+            case .master: return "≈ 50–160 Mbps (CRF 4; about 100 Mbps on the 2DIE4 master), well above a UHD Blu-ray — as close to the master as a player can play (Level 5.1 High tier)"
+            case .maximum: return "≈ 40–90 Mbps, like a UHD Blu-ray"
+            case .high: return "≈ 30–60 Mbps, above the best streaming"
+            case .compact: return "≈ 15–35 Mbps, like 4K streaming"
             }
         }
     }
@@ -514,6 +514,87 @@ final class HDRSettings {
         var preset: String { switch self { case .slow: return "slow"; case .medium: return "medium"; case .fast: return "fast"; case .draft: return "ultrafast" } }
         /// rough x265 speed for 4K on Apple Silicon (frames per second)
         var fps4K: Double { switch self { case .slow: return 3.5; case .medium: return 7; case .fast: return 13; case .draft: return 40 } }
+    }
+    /// How the HEVC encoder spends its bits
+    enum RateMode: String, CaseIterable, Identifiable {
+        case quality, average, constant
+        var id: String { rawValue }
+        var label: String { switch self { case .quality: return "Quality (CRF)"; case .average: return "Average (2-pass VBR)"; case .constant: return "Constant (CBR)" } }
+        /// `--rate` names on the command line
+        static func named(_ s: String) -> RateMode? {
+            switch s.lowercased() { case "crf", "quality": return .quality; case "2pass", "twopass", "average", "vbr": return .average; case "cbr", "constant": return .constant; default: return nil }
+        }
+        var detail: String {
+            switch self {
+            case .quality: return "A fixed quality level; the bitrate follows the picture — less on easy scenes, more on hard ones, never above the ceiling. What UHD Blu-ray encoders do."
+            case .average: return "A target average in Mbps over the whole film: a first pass measures the picture, a second spends the bits where they are needed. Predictable size, quality still follows the scenes."
+            case .constant: return "The same bitrate from the first frame to the last (x265 strict CBR), whatever the scene. The most predictable size; bits are wasted on easy scenes."
+            }
+        }
+    }
+    /// Reference bitrates for the Average and Constant modes (picture only, Mbps)
+    enum BitratePreset: String, CaseIterable, Identifiable {
+        case streaming4K, bluray, uhdBluray, kaleidescapeCinematic, masterFile, custom
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .streaming4K: return "Streaming 4K"
+            case .bluray: return "Blu-ray"
+            case .uhdBluray: return "UHD Blu-ray"
+            case .kaleidescapeCinematic: return "Kaleidescape 4K Cinematic"
+            case .masterFile: return "Master file"
+            case .custom: return "Custom (type the Mbps)"
+            }
+        }
+        /// the average (2-pass) or the constant bitrate
+        var mbps: Int { switch self { case .streaming4K: return 25; case .bluray: return 35; case .uhdBluray: return 80; case .kaleidescapeCinematic: return 110; case .masterFile: return 200; case .custom: return 0 } }
+        /// the peak the 2-pass encode may reach
+        var maxMbps: Int { switch self { case .streaming4K: return 40; case .bluray: return 40; case .uhdBluray: return 100; case .kaleidescapeCinematic: return 160; case .masterFile: return 240; case .custom: return 0 } }
+        var detail: String {
+            switch self {
+            case .streaming4K: return "25 Mbps — what the best 4K services stream (Apple TV+ averages 26–29 Mbps, Netflix about 16)"
+            case .bluray: return "35 Mbps — a full-rate Blu-ray (its H.264 tops out at 40 Mbps)"
+            case .uhdBluray: return "80 Mbps — a high-rate UHD Blu-ray (the disc's HEVC limit is 100 Mbps)"
+            case .kaleidescapeCinematic: return "110 Mbps — Kaleidescape's 4K Cinematic tier, its own figure (Strato K only)"
+            case .masterFile: return "200 Mbps — twice a UHD Blu-ray, for the screening room; HEVC Level 5.2, beyond what most players are rated for"
+            case .custom: return "Your own figures: the average (or the constant bitrate) and, for 2-pass, the peak"
+            }
+        }
+    }
+    /// What the job encodes with (frozen in the plan)
+    struct Rate: Equatable {
+        var mode: RateMode = .quality
+        var targetMbps = 100               // Average / Constant: the average or the constant bitrate
+        var maxMbps = 160                  // Average: the peak (VBV); Constant: = targetMbps
+        var floor = true                   // Average / Constant: no frame worse than QP `floorQP`, however easy the scene
+        static let floorQP = 18
+        /// `--rate MODE --mbps N [--max-mbps N] [--no-floor]`: nil when no rate option was given
+        static func fromCLI(mode: RateMode?, mbps: Int?, maxMbps: Int?, floor: Bool) -> Rate? {
+            guard let mode, mode != .quality else { return mode == nil ? nil : Rate() }
+            let t = max(mbps ?? 100, 1)
+            return Rate(mode: mode, targetMbps: t, maxMbps: mode == .constant ? t : max(maxMbps ?? Int(Double(t) * 1.5), t), floor: floor)
+        }
+        /// above this VBV the stream leaves HEVC Level 5.1 High tier (the UHD Blu-ray envelope)
+        static let level51Mbps = 160
+        var beyondLevel51: Bool { mode != .quality && maxMbps > Rate.level51Mbps }
+        /// for the log and the result lines
+        func text(_ q: Quality) -> String {
+            switch mode {
+            case .quality: return "CRF \(Int(q.crf)) (max \(q.maxMbps) Mbps)"
+            case .average: return "2-pass average \(targetMbps) Mbps (peak \(maxMbps) Mbps" + (floor ? ", floor QP \(Rate.floorQP))" : ")")
+            case .constant: return "CBR \(targetMbps) Mbps" + (floor ? " (floor QP \(Rate.floorQP))" : "")
+            }
+        }
+        /// for the panels
+        var summary: String {
+            let level = beyondLevel51 ? "HEVC Level 5.2 — beyond the Level 5.1 envelope of UHD Blu-ray and most players; fine on the Zidoo, test anything else"
+                                      : "HEVC Level 5.1 High tier, the UHD Blu-ray envelope"
+            switch mode {
+            case .quality: return ""
+            case .average: return "2-pass VBR · average \(targetMbps) Mbps · peak \(maxMbps) Mbps" + (floor ? " · floor QP \(Rate.floorQP)" : "") + " · " + level
+            case .constant: return "CBR · \(targetMbps) Mbps from start to end" + (floor ? " · floor QP \(Rate.floorQP)" : "") + " · " + level
+            }
+        }
     }
 
     var encode = false
@@ -528,6 +609,17 @@ final class HDRSettings {
     var hdr10plusFrames: Int?
     var quality: Quality = .maximum
     var speed: Speed = .slow
+    var rateMode: RateMode = .quality
+    var bitratePreset: BitratePreset = .kaleidescapeCinematic
+    var customMbps = 100
+    var customMaxMbps = 160
+    var qualityFloor = true
+    /// The bitrate control the next encode uses
+    var rate: Rate {
+        let t = max(bitratePreset == .custom ? customMbps : bitratePreset.mbps, 1)
+        let m = rateMode == .constant ? t : max(bitratePreset == .custom ? customMaxMbps : bitratePreset.maxMbps, t)
+        return Rate(mode: rateMode, targetMbps: t, maxMbps: m, floor: qualityFloor)
+    }
     var mastering = MasteringDisplay()
     var maxCLL = 0
     var maxFALL = 0
@@ -701,15 +793,7 @@ struct HDRPanel: View {
                     Text("HDR10 (always)")
                     metaLine("\(hdr.mastering.text) · MaxCLL \(hdr.maxCLL) · MaxFALL \(hdr.maxFALL)", detail: hdr.masteringSource, bad: false)
                 }
-                Picker(selection: $hdr.quality) {
-                    ForEach(HDRSettings.Quality.allCases) { Text($0.label).tag($0) }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Quality")
-                        Text(hdr.quality.detail).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .disabled(project.busy)
+                RateControlRows(hdr: hdr, showsQuality: true, disabled: project.busy)
                 Picker("Speed", selection: $hdr.speed) {
                     ForEach(HDRSettings.Speed.allCases) { Text($0.label).tag($0) }
                 }
@@ -816,6 +900,72 @@ struct PlaybackRows: View {
                 Text(device).font(.subheadline.weight(.medium))
                 Text(what).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+}
+
+/// Bitrate control of the HEVC encode: the mode (CRF / 2-pass / CBR), the quality level or the target, the quality floor.
+/// Shared by the Mux's HDR panel and the Transcode inspector.
+struct RateControlRows: View {
+    @Bindable var hdr: HDRSettings
+    var showsQuality: Bool          // the Transcode inspector has its own Quality picker (shared with H.264)
+    var disabled: Bool
+
+    var body: some View {
+        Picker(selection: $hdr.rateMode) {
+            ForEach(HDRSettings.RateMode.allCases) { Text($0.label).tag($0) }
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Bitrate")
+                Text(hdr.rateMode.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .disabled(disabled)
+        if hdr.rateMode == .quality {
+            if showsQuality {
+                Picker(selection: $hdr.quality) {
+                    ForEach(HDRSettings.Quality.allCases) { Text($0.label).tag($0) }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Quality")
+                        Text(hdr.quality.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .disabled(disabled)
+            }
+        } else {
+            Picker(selection: $hdr.bitratePreset) {
+                ForEach(HDRSettings.BitratePreset.allCases) { Text($0.label).tag($0) }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Target")
+                    Text(hdr.bitratePreset.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .disabled(disabled)
+            if hdr.bitratePreset == .custom {
+                LabeledContent(hdr.rateMode == .average ? "Average" : "Bitrate") {
+                    HStack(spacing: 4) {
+                        TextField("", value: $hdr.customMbps, format: .number).textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
+                        Text("Mbps")
+                    }
+                }
+                .disabled(disabled)
+                if hdr.rateMode == .average {
+                    LabeledContent("Peak") {
+                        HStack(spacing: 4) {
+                            TextField("", value: $hdr.customMaxMbps, format: .number).textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
+                            Text("Mbps")
+                        }
+                    }
+                    .disabled(disabled)
+                }
+            }
+            Toggle(isOn: $hdr.qualityFloor) {
+                Text("Quality floor — no frame worse than QP \(HDRSettings.Rate.floorQP), however easy the scene")
+            }
+            .toggleStyle(.checkbox).disabled(disabled)
+            Text(hdr.rate.summary).font(.caption).foregroundStyle(hdr.rate.beyondLevel51 ? Color.orange : Color.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

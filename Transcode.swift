@@ -227,7 +227,7 @@ enum ProResProfile: String, CaseIterable, Identifiable {
     var bits: Int { is4444 ? 12 : 10 }
     var fourcc: String { switch self { case .proxy: return "apco"; case .lt: return "apcs"; case .standard: return "apcn"; case .hq: return "apch"; case .p4444: return "ap4h"; case .xq: return "ap4x" } }
     var mediaInfoProfile: String { switch self { case .proxy: return "422 Proxy"; case .lt: return "422 LT"; case .standard: return "422"; case .hq: return "422 HQ"; case .p4444: return "4444"; case .xq: return "4444 XQ" } }
-    /// Apple's data rates (bits per pixel per frame; 3840×2160 at 29.97 fps: Proxy 145, LT 328, 422 471, HQ 707, 4444 1061, XQ 1591 Mb/s)
+    /// Apple's data rates (bits per pixel per frame; 3840×2160 at 29.97 fps: Proxy 145, LT 328, 422 471, HQ 707, 4444 1061, XQ 1591 Mbps)
     var bitsPerPixel: Double { switch self { case .proxy: return 0.58; case .lt: return 1.32; case .standard: return 1.89; case .hq: return 2.84; case .p4444: return 4.27; case .xq: return 6.40 } }
 }
 
@@ -240,10 +240,12 @@ enum TargetCodec: String, CaseIterable, Identifiable {
 enum VideoTarget: Equatable {
     case prores(ProResProfile)
     case h264(quality: HDRSettings.Quality, speed: HDRSettings.Speed)
-    case hevc(quality: HDRSettings.Quality, speed: HDRSettings.Speed)
+    case hevc(quality: HDRSettings.Quality, speed: HDRSettings.Speed, rate: HDRSettings.Rate = HDRSettings.Rate())
     var codec: TargetCodec { switch self { case .prores: return .prores; case .h264: return .h264; case .hevc: return .hevc } }
-    var quality: HDRSettings.Quality? { switch self { case .prores: return nil; case .h264(let q, _), .hevc(let q, _): return q } }
-    var speed: HDRSettings.Speed? { switch self { case .prores: return nil; case .h264(_, let s), .hevc(_, let s): return s } }
+    var quality: HDRSettings.Quality? { switch self { case .prores: return nil; case .h264(let q, _): return q; case .hevc(let q, _, _): return q } }
+    var speed: HDRSettings.Speed? { switch self { case .prores: return nil; case .h264(_, let s): return s; case .hevc(_, let s, _): return s } }
+    /// HEVC: how the bits are spent (CRF, 2-pass average, CBR)
+    var rate: HDRSettings.Rate? { if case .hevc(_, _, let r) = self { return r }; return nil }
 }
 
 enum ColorPipeline: Equatable {
@@ -371,7 +373,9 @@ struct TranscodePlan {
         switch video {
         case .prores(let p): return p.bitsPerPixel * pixels * fps.value * seconds / 8
         case .h264(let q, _): return q.averageMbps * 1_000_000 / 8 * seconds * pixels / 8_294_400 * 0.85
-        case .hevc(let q, _): return q.averageMbps * 1_000_000 / 8 * seconds * pixels / 8_294_400
+        case .hevc(let q, _, let r):
+            if r.mode != .quality { return Double(r.targetMbps) * 1_000_000 / 8 * seconds }   // the target is the size
+            return q.averageMbps * 1_000_000 / 8 * seconds * pixels / 8_294_400
         }
     }
     /// rough frames per second at UHD on this Mac, per encoder
@@ -379,7 +383,7 @@ struct TranscodePlan {
         switch video {
         case .prores: return encoder == "prores_videotoolbox" ? 90 : 10
         case .h264(_, let s): return usesVideoToolbox ? 120 : s.fps4K * 2.5
-        case .hevc(_, let s): return usesVideoToolbox ? 120 : s.fps4K
+        case .hevc(_, let s, let r): return usesVideoToolbox ? 120 : s.fps4K / (r.mode == .average ? 1.35 : 1)   // 2-pass: a fast first pass on top
         }
     }
     var estimatedSeconds: Double { Double(frames) / (fps4K * 8_294_400 / Double(max(width * height, 1))) }
@@ -457,7 +461,7 @@ struct TranscodePlan {
         switch effectiveAudio {
         case .copy: aOut = s.audio.isEmpty ? "none" : a + " (bit for bit)"
         case .pcm: aOut = s.audio.isEmpty ? "none" : "PCM 24-bit, " + s.audio.map { Probe.channelText($0.channels, $0.layout) }.joined(separator: ", ")
-        case .aac: aOut = s.audio.isEmpty ? "none" : "AAC \(aacKbps) kb/s, " + s.audio.map { Probe.channelText($0.channels, $0.layout) }.joined(separator: ", ")
+        case .aac: aOut = s.audio.isEmpty ? "none" : "AAC \(aacKbps) kbps, " + s.audio.map { Probe.channelText($0.channels, $0.layout) }.joined(separator: ", ")
         case .none: aOut = "none"
         }
         add("Audio", a, aOut)
@@ -472,7 +476,8 @@ struct TranscodePlan {
 enum Transcode {
     /// The ffmpeg command. `elementary`: only the picture, as a raw HEVC stream (the Mux path injects the Dolby Vision /
     /// HDR10+ metadata into it and MP4Box muxes it); otherwise the whole file, audio included, straight into the container.
-    static func arguments(_ p: TranscodePlan, concat: URL?, output: URL, elementary: Bool) -> [String] {
+    /// `pass` / `stats`: the 2-pass average mode runs the command twice — pass 1 writes only the stats file (output discarded), pass 2 reads it.
+    static func arguments(_ p: TranscodePlan, concat: URL?, output: URL, elementary: Bool, pass: Int = 0, stats: URL? = nil) -> [String] {
         var a = ["-nostdin", "-v", "error", "-nostats", "-progress", "pipe:1"]
         if let concat { a += ["-f", "concat", "-safe", "0", "-i", concat.path] }
         else if let s = p.segments.first {
@@ -522,10 +527,12 @@ enum Transcode {
             } else {
                 a += ["-c:v", "libx264", "-preset", s.preset, "-crf", String(format: "%.0f", q.crf + 2), "-maxrate", "\(vbv)k", "-bufsize", "\(vbv)k", "-profile:v", "high"]
             }
-        case .hevc(let q, let s):
-            let vbv = q.maxMbps * 1000
+        case .hevc(let q, let s, let r):
+            // Quality (CRF): the arguments of v1.5, untouched. Average / Constant only change the rate-control part.
+            let vbv = r.mode == .quality ? q.maxMbps * 1000 : r.maxMbps * 1000
             if p.encoder == "hevc_videotoolbox" {
-                a += ["-c:v", "hevc_videotoolbox", "-b:v", "\(Int(q.averageMbps * 1000))k", "-maxrate", "\(vbv)k", "-bufsize", "\(vbv)k", "-profile:v", "main10"]
+                let target = r.mode == .quality ? Int(q.averageMbps * 1000) : r.targetMbps * 1000
+                a += ["-c:v", "hevc_videotoolbox", "-b:v", "\(target)k", "-maxrate", "\(vbv)k", "-bufsize", "\(vbv)k", "-profile:v", "main10"]
             } else {
                 var x265 = ["log-level=error"]
                 if let h = p.hdr { _ = h; x265 += ["hdr10=1", "hdr10-opt=1"] }
@@ -533,12 +540,32 @@ enum Transcode {
                          "colorprim=\(c.primaries ?? "bt709")", "transfer=\(c.transfer ?? "bt709")", "colormatrix=\(c.matrix ?? "bt709")", "range=\(c.range == "pc" ? "full" : "limited")"]
                 if p.isBT2020 { x265.append("chromaloc=2") }
                 if let h = p.hdr { x265 += ["master-display=\(h.mastering.x265)", "max-cll=\(h.maxCLL),\(h.maxFALL)"] }
-                x265 += ["vbv-maxrate=\(vbv)", "vbv-bufsize=\(vbv)", "aq-mode=3", "no-sao=1"]
-                a += ["-c:v", "libx265", "-preset", s.preset, "-crf", String(format: "%.0f", q.crf), "-x265-params", x265.joined(separator: ":")]
+                switch r.mode {
+                case .quality:
+                    x265 += ["vbv-maxrate=\(vbv)", "vbv-bufsize=\(vbv)", "aq-mode=3", "no-sao=1"]
+                    a += ["-c:v", "libx265", "-preset", s.preset, "-crf", String(format: "%.0f", q.crf), "-x265-params", x265.joined(separator: ":")]
+                case .average:
+                    // ABR at the target with a VBV at the peak; the stats of pass 1 let pass 2 spend the bits where the film needs them
+                    x265 += ["vbv-maxrate=\(vbv)", "vbv-bufsize=\(vbv)", "aq-mode=3", "no-sao=1"]
+                    if r.floor { x265.append("qpmax=\(HDRSettings.Rate.floorQP)") }
+                    if let stats, pass > 0 {
+                        x265 += ["pass=\(pass)", "stats=\(stats.path)"]
+                        if pass == 1 { x265.append("slow-firstpass=0") }       // the first pass only measures: fast settings
+                    }
+                    a += ["-c:v", "libx265", "-preset", s.preset, "-b:v", "\(r.targetMbps * 1000)k", "-x265-params", x265.joined(separator: ":")]
+                case .constant:
+                    // bitrate = VBV = the target, strict-cbr: x265 holds the rate from start to end (no padding bytes, so it still breathes a little)
+                    let t = r.targetMbps * 1000
+                    x265 += ["vbv-maxrate=\(t)", "vbv-bufsize=\(t)", "strict-cbr=1", "aq-mode=3", "no-sao=1"]
+                    if r.floor { x265.append("qpmax=\(HDRSettings.Rate.floorQP)") }
+                    a += ["-c:v", "libx265", "-preset", s.preset, "-b:v", "\(t)k", "-x265-params", x265.joined(separator: ":")]
+                }
             }
         }
         a += ["-color_primaries", c.primaries ?? "bt709", "-color_trc", c.transfer ?? "bt709", "-colorspace", c.matrix ?? "bt709", "-color_range", c.range ?? "tv"]
-        if elementary {
+        if pass == 1 {
+            a += ["-f", "null", "-y", "/dev/null"]        // first pass of two: only the stats file is kept
+        } else if elementary {
             a += ["-f", "hevc", "-y", output.path]
         } else {
             if p.video.codec == .hevc && p.container != .mkv { a += ["-tag:v", "hvc1"] }
@@ -546,6 +573,18 @@ enum Transcode {
             a += ["-r", "\(p.fps.num)/\(p.fps.den)", "-y", output.path]
         }
         return a
+    }
+
+    /// The 2-pass average mode: runs the first pass and returns its stats file (nil when the plan doesn't need one)
+    static func twoPassStats(_ p: TranscodePlan, concat: URL?, tmp: URL, cancel: CancelFlag,
+                             stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void) throws -> URL? {
+        guard let r = p.video.rate, r.mode == .average, p.encoder == "libx265" else { return nil }
+        let stats = tmp.appendingPathComponent("x265.stats")
+        let args = arguments(p, concat: concat, output: stats, elementary: true, pass: 1, stats: stats)
+        let res = encode(args, frames: p.frames, label: "Pass 1 of 2: measuring the picture (x265, average \(r.targetMbps) Mbps)", cancel: cancel, stage: stage, log: log)
+        if cancel.isSet { throw Cancelled() }
+        guard res.status == 0, FileManager.default.fileExists(atPath: stats.path) else { throw AppError("The first pass failed (ffmpeg error \(res.status)). See the log.") }
+        return stats
     }
 
     /// Progress line of ffmpeg (-progress pipe:1): "frame=123"
@@ -626,16 +665,17 @@ enum Transcode {
             concat = u
         }
         let base = tmp.appendingPathComponent("video.hevc")
-        let args = arguments(p, concat: concat, output: base, elementary: true)
         let started = Date()
-        let q = p.video.quality ?? .high, s = p.video.speed ?? .medium
-        let label = "Encoding the picture (x265 \(s.preset), quality \(q.label.lowercased()))"
+        let q = p.video.quality ?? .high, s = p.video.speed ?? .medium, rate = p.video.rate ?? HDRSettings.Rate()
+        let stats = try twoPassStats(p, concat: concat, tmp: tmp, cancel: cancel, stage: stage, log: log)
+        let args = arguments(p, concat: concat, output: base, elementary: true, pass: stats == nil ? 0 : 2, stats: stats)
+        let label = stats == nil ? "Encoding the picture (x265 \(s.preset), \(rate.text(q)))" : "Pass 2 of 2: encoding the picture (x265 \(s.preset), \(rate.text(q)))"
         let r = encode(args, frames: p.frames, label: label, cancel: cancel, stage: stage, log: log)
         if cancel.isSet { throw Cancelled() }
         guard r.status == 0, fm.fileExists(atPath: base.path) else { throw AppError("The picture encode failed (ffmpeg error \(r.status)). See the log.") }
         guard r.done == p.frames else { throw AppError("The encode produced \(Fmt.int(r.done)) frames, \(Fmt.int(p.frames)) were expected — the source is shorter than its metadata says.") }
         let c = p.outputColor
-        notes.append("Picture: HEVC Main 10 4:2:0 \(c.short) · x265 \(s.preset), CRF \(Int(q.crf)) (max \(q.maxMbps) Mb/s) · \(Fmt.int(r.done)) frames in \(Fmt.hm(Date().timeIntervalSince(started)))" +
+        notes.append("Picture: HEVC Main 10 4:2:0 \(c.short) · x265 \(s.preset), \(rate.text(q)) · \(Fmt.int(r.done)) frames in \(Fmt.hm(Date().timeIntervalSince(started)))" +
                      (p.hdr.map { " · HDR10 \($0.mastering.text), MaxCLL \($0.maxCLL), MaxFALL \($0.maxFALL)" } ?? ""))
 
         // 3. HDR10+ (SEI) and Dolby Vision (RPU NAL units) go into the stream, frame by frame
@@ -856,12 +896,16 @@ final class TranscodeRunner {
         } else {
             let ext = plan.container.rawValue
             let t = tmp.appendingPathComponent("output.\(ext)")
-            let args = Transcode.arguments(plan, concat: nil, output: t, elementary: false)
+            let stats: URL?
+            do { stats = try Transcode.twoPassStats(plan, concat: nil, tmp: tmp, cancel: cancel, stage: onStage, log: onLog) }
+            catch is Cancelled { return cancelled }
+            catch { return TranscodeResult(state: .failed, lines: [error.localizedDescription], output: nil) }
+            let args = Transcode.arguments(plan, concat: nil, output: t, elementary: false, pass: stats == nil ? 0 : 2, stats: stats)
             let what: String
             switch plan.video {
             case .prores(let p): what = "Encoding \(p.label) (\(plan.encoder == "prores_videotoolbox" ? "Apple VideoToolbox" : "ffmpeg prores_ks"))"
             case .h264(let q, let s): what = "Encoding H.264 (\(plan.usesVideoToolbox ? "VideoToolbox" : "x264 \(s.preset)"), quality \(q.label.lowercased()))"
-            case .hevc(let q, let s): what = "Encoding HEVC (\(plan.usesVideoToolbox ? "VideoToolbox" : "x265 \(s.preset)"), quality \(q.label.lowercased()))"
+            case .hevc(let q, let s, let r): what = (stats == nil ? "Encoding HEVC" : "Pass 2 of 2: encoding HEVC") + " (\(plan.usesVideoToolbox ? "VideoToolbox" : "x265 \(s.preset)"), \(r.text(q)))"
             }
             let r = Transcode.encode(args, frames: plan.frames, label: what, cancel: cancel, stage: onStage, log: onLog)
             if cancel.isSet { return cancelled }
@@ -1084,7 +1128,7 @@ final class TranscodeModel {
         switch codec {
         case .prores: return .prores(proresProfile)
         case .h264: return .h264(quality: quality, speed: speed)
-        case .hevc: return .hevc(quality: quality, speed: speed)
+        case .hevc: return .hevc(quality: quality, speed: speed, rate: hdr.rate)
         }
     }
 
@@ -1233,10 +1277,12 @@ final class TranscodeModel {
 
     /// A plan for the command line
     static func plan(source: SourceVideo, preset: TranscodePreset, resolution: OutputResolution, toneMap: Bool, container: Container?,
-                     quality: HDRSettings.Quality?, speed: HDRSettings.Speed?, audio: AudioPlan?, dv: URL?, hdr10plus: URL?, mi: MITrack?) -> TranscodePlan {
+                     quality: HDRSettings.Quality?, speed: HDRSettings.Speed?, audio: AudioPlan?, dv: URL?, hdr10plus: URL?, mi: MITrack?,
+                     rate: HDRSettings.Rate? = nil) -> TranscodePlan {
         let m = TranscodeModel()
         m.preset = preset
         if let quality { m.quality = quality }
+        if let rate { m.hdr.rateMode = rate.mode; m.hdr.bitratePreset = .custom; m.hdr.customMbps = rate.targetMbps; m.hdr.customMaxMbps = rate.maxMbps; m.hdr.qualityFloor = rate.floor }
         if let speed { m.speed = speed }
         if let audio { m.audio = audio }
         if let container { m.container = container }
@@ -1258,6 +1304,7 @@ final class TranscodeModel {
         setvbuf(stdout, nil, _IOLBF, 0)
         var input: String?, to = "prores422hq", res = OutputResolution.same, toneMap = false, out: String?, qc = true, vmaf = false
         var quality: HDRSettings.Quality?, speed: HDRSettings.Speed?, audio: AudioPlan?, container: Container?, dv: String?, hdr10plus: String?
+        var rateMode: HDRSettings.RateMode?, mbps: Int?, maxMbps: Int?, floor = true
         var i = 0
         func next() -> String? { i += 1; return i < args.count ? args[i] : nil }
         while i < args.count {
@@ -1268,6 +1315,10 @@ final class TranscodeModel {
             case "--out", "-o": out = next()
             case "--quality": quality = HDRSettings.Quality(rawValue: next() ?? "")
             case "--speed": speed = HDRSettings.Speed(rawValue: next() ?? "")
+            case "--rate": rateMode = HDRSettings.RateMode.named(next() ?? "")
+            case "--mbps": mbps = Int(next() ?? "")
+            case "--max-mbps": maxMbps = Int(next() ?? "")
+            case "--no-floor": floor = false
             case "--audio": audio = AudioPlan(rawValue: next() ?? "")
             case "--mov": container = .mov
             case "--mp4": container = .mp4
@@ -1281,13 +1332,14 @@ final class TranscodeModel {
             i += 1
         }
         guard let input, let out, let preset = TranscodePreset.named(to) else {
-            print("usage: --transcode IN --to prores422hq|prores422|h264|hevc|hevcdv [--res hd|uhd] [--tonemap] [--quality master|maximum|high|compact] [--speed slow|medium|fast|draft] [--audio copy|pcm|aac|none] [--mov|--mp4|--mkv] [--dv XML] [--hdr10plus JSON] [--no-qc] [--vmaf] --out OUT")
+            print("usage: --transcode IN --to prores422hq|prores422|h264|hevc|hevcdv [--res hd|uhd] [--tonemap] [--quality master|maximum|high|compact] [--speed slow|medium|fast|draft] [--rate crf|2pass|cbr --mbps N [--max-mbps N] [--no-floor]] [--audio copy|pcm|aac|none] [--mov|--mp4|--mkv] [--dv XML] [--hdr10plus JSON] [--no-qc] [--vmaf] --out OUT")
             return 2
         }
         let url = URL(fileURLWithPath: input)
         guard let src = SourceVideo.read(url) else { print("ERROR: no picture ffmpeg can read in \(input)"); return 1 }
+        let rate = HDRSettings.Rate.fromCLI(mode: rateMode, mbps: mbps, maxMbps: maxMbps, floor: floor)
         var plan = plan(source: src, preset: preset, resolution: res, toneMap: toneMap, container: container, quality: quality, speed: speed, audio: audio,
-                        dv: dv.map { URL(fileURLWithPath: $0) }, hdr10plus: hdr10plus.map { URL(fileURLWithPath: $0) }, mi: src.mi)
+                        dv: dv.map { URL(fileURLWithPath: $0) }, hdr10plus: hdr10plus.map { URL(fileURLWithPath: $0) }, mi: src.mi, rate: rate)
         let output = URL(fileURLWithPath: out)
         if container == nil, let c = Container(rawValue: output.pathExtension.lowercased()) { plan.container = c }
         print("SOURCE: \(src.url.lastPathComponent) · \(src.summary) · \(src.sizeText) @ \(src.fpsText) fps · \(Fmt.int(src.frames)) frames · colour \(src.color.isTagged ? src.color.text : "untagged")" + (src.timecode.map { " · TC \($0)" } ?? ""))

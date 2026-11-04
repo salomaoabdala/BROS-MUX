@@ -293,18 +293,23 @@ struct TranscodeInspector: View {
                     Text("ProRes has no quality setting: the profile is the quality. Encoder: " + (Tools.proresEncoder == "prores_videotoolbox" ? "Apple VideoToolbox (the ProRes hardware of the M chips)." : "ffmpeg prores_ks (Apple's VideoToolbox encoder isn't in this ffmpeg)."))
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Picker(selection: $m.quality) {
-                        ForEach(HDRSettings.Quality.allCases) { Text($0.label).tag($0) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Quality")
-                            Text(m.quality.detail).font(.caption).foregroundStyle(.secondary)
+                    if m.codec == .hevc { RateControlRows(hdr: m.hdr, showsQuality: false, disabled: m.busy) }
+                    if m.codec == .h264 || m.hdr.rateMode == .quality {
+                        Picker(selection: $m.quality) {
+                            ForEach(HDRSettings.Quality.allCases) { Text($0.label).tag($0) }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Quality")
+                                Text(m.quality.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
                         }
+                        .disabled(m.busy)
                     }
-                    .disabled(m.busy)
                     Picker("Speed", selection: $m.speed) { ForEach(HDRSettings.Speed.allCases) { Text($0.label).tag($0) } }
                         .disabled(m.busy)
-                    Text(m.speed == .draft ? "Draft uses the hardware encoder (VideoToolbox): fast, bigger files, not for delivery." : "\(m.codec == .h264 ? "x264" : "x265") preset \(m.speed.preset), CRF \(Int(m.codec == .h264 ? m.quality.crf + 2 : m.quality.crf)), up to \(m.quality.maxMbps) Mb/s.")
+                    Text(m.speed == .draft ? "Draft uses the hardware encoder (VideoToolbox): fast, bigger files, not for delivery."
+                         : m.codec == .hevc && m.hdr.rateMode != .quality ? "x265 preset \(m.speed.preset), \(m.hdr.rate.text(m.quality))."
+                         : "\(m.codec == .h264 ? "x264" : "x265") preset \(m.speed.preset), CRF \(Int(m.codec == .h264 ? m.quality.crf + 2 : m.quality.crf)), up to \(m.quality.maxMbps) Mbps.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if m.codec == .hevc {
