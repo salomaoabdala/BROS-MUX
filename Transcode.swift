@@ -535,6 +535,10 @@ enum Transcode {
                 a += ["-c:v", "hevc_videotoolbox", "-b:v", "\(target)k", "-maxrate", "\(vbv)k", "-bufsize", "\(vbv)k", "-profile:v", "main10"]
             } else {
                 var x265 = ["log-level=error"]
+                // Estes dois seguem o preset no x265 (psy-rdoq e rdoq-level so ligam em
+                // slow/slower/veryslow). Fixados aqui para que trocar o preset mude a
+                // velocidade e nao, em silencio, o tratamento de textura e grao.
+                x265 += ["psy-rd=2.0", "psy-rdoq=1.0", "rdoq-level=2"]
                 if let h = p.hdr { _ = h; x265 += ["hdr10=1", "hdr10-opt=1"] }
                 x265 += ["repeat-headers=1", "aud=1", "hrd=1",
                          "colorprim=\(c.primaries ?? "bt709")", "transfer=\(c.transfer ?? "bt709")", "colormatrix=\(c.matrix ?? "bt709")", "range=\(c.range == "pc" ? "full" : "limited")"]
