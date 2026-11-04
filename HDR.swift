@@ -608,7 +608,7 @@ final class HDRSettings {
     var hdr10plusJSON: URL?
     var hdr10plusFrames: Int?
     var quality: Quality = .maximum
-    var speed: Speed = .slow
+    var speed: Speed = .medium   // padrao do dono (2026-11-04): slow dobra o tempo e some a 110+ Mbps
     var rateMode: RateMode = .quality
     var bitratePreset: BitratePreset = .kaleidescapeCinematic
     var customMbps = 100
