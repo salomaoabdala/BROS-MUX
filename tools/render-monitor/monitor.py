@@ -12,6 +12,9 @@ import re
 import subprocess
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import x265stats
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.expanduser("~/.bros-mux-monitor")
@@ -22,6 +25,15 @@ FPS_RE = re.compile(r"([\d.]+) fps")
 PCT_RE = re.compile(r"(\d+)\s*%\s*$")
 PASS_RE = re.compile(r"Pass (\d+) of (\d+)")
 OUT_RE = re.compile(r"-o (.+?) --")
+IN_RE = re.compile(r" -i (.+?) -(?:map|vf|c:v|an|sn|frames|filter)")
+STATS_RE = re.compile(r"stats=(.+?)(?::[a-z-]+=|$| -)")
+PASSP_RE = re.compile(r"[:\s]pass=(\d)")
+BV_RE = re.compile(r"-b:v (\d+)k")
+VBV_RE = re.compile(r"vbv-maxrate=(\d+)")
+NFRAMES_RE = re.compile(r"-frames:v (\d+)")
+FPSP_RE = re.compile(r"fps=(\d+)(?:/1)?")
+TOOLS = ("ffmpeg", "MP4Box", "dovi_tool", "mkvmerge", "mkvpropedit", "x265")
+FRAME_MIN_INTERVAL = 12  # s entre duas extracoes de miniatura
 SCRIPT_RE = re.compile(r"^script (?:-\w+ )*(\S+\.log)\b")
 
 
@@ -66,30 +78,66 @@ def find_processes():
         m = SCRIPT_RE.match(args)
         if m:
             logs[pid] = m.group(1)
-    jobs, apps = [], []
+    jobs = []
     binary = re.compile(r"^\S*BROS-MUX\.app/Contents/MacOS/BROS-MUX\b")
     for pid, ppid, cpu, args in rows:
         if not binary.match(args):
             continue
-        if "--job" in args:
-            out = OUT_RE.search(args)
-            jobs.append({
-                "pid": pid,
-                "cpu": cpu,
-                "args": args,
-                "log": logs.get(ppid),
-                "output": out.group(1).strip() if out else None,
-            })
-        elif args.endswith("MacOS/BROS-MUX"):
-            apps.append({"pid": pid, "cpu": cpu})
-    # ffmpeg/x265 por job
-    for j in jobs:
-        j["cpu_encoder"] = sum(c for _p, pp, c, a in rows if pp == j["pid"] and "ffmpeg" in a)
-        enc = next((a for _p, pp, _c, a in rows if pp == j["pid"] and "ffmpeg" in a), "")
-        # x265 roda a passada 1 com analise reduzida (slow-firstpass=0): a
-        # passada 2, no preset cheio, e bem mais lenta que a 1.
-        j["fast_first_pass"] = "slow-firstpass=0" in enc
-    return jobs, apps
+        out = OUT_RE.search(args)
+        # filhos: e por eles que se sabe o que o app esta fazendo agora
+        kids = [(c, a) for _p, pp, c, a in rows
+                if pp == pid and any(t in a for t in TOOLS)]
+        enc = next((a for _c, a in kids if "libx265" in a or "ffmpeg" in a), "")
+        tool = None
+        for _c, a in kids:
+            base = os.path.basename(a.split(" ")[0])
+            if base != "ffmpeg":
+                tool = base
+                break
+        jobs.append({
+            "pid": pid,
+            "cpu": cpu,
+            "args": args,
+            "gui": "--job" not in args,
+            "log": logs.get(ppid),
+            "output": out.group(1).strip() if out else output_of(enc),
+            "cpu_encoder": sum(c for c, a in kids),
+            "encoder_args": enc,
+            "tool": tool,
+            "busy": bool(kids),
+            "fast_first_pass": "slow-firstpass=0" in enc,
+        })
+    return jobs
+
+
+def output_of(enc):
+    """Saida do ffmpeg: o ultimo argumento da linha de comando."""
+    if not enc:
+        return None
+    last = enc.rstrip().split(" ")[-1].strip('"')
+    return last if "/" in last and last != "/dev/null" else None
+
+
+def encoder_info(enc):
+    """O que da para saber do encode so pela linha de comando do ffmpeg."""
+    if not enc:
+        return {}
+    def g(rx, cast=str):
+        m = rx.search(enc)
+        return cast(m.group(1)) if m else None
+    stats = g(STATS_RE)
+    if stats:
+        stats = stats.strip().strip('"')
+    return {
+        "source": (g(IN_RE) or "").strip('"') or None,
+        "stats": stats,
+        "pass_no": g(PASSP_RE, int),
+        "target_mbps": (g(BV_RE, int) or 0) / 1000 or None,
+        "max_mbps": (g(VBV_RE, int) or 0) / 1000 or None,
+        "frames_total": g(NFRAMES_RE, int),
+        "fps": g(FPSP_RE, int) or 24,
+        "hevc": output_of(enc),
+    }
 
 
 CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -223,7 +271,60 @@ def partial_output(output):
     return None
 
 
+_profile_cache = {}
+
+
+def profile_cached(info, current, now):
+    """Perfil de bitrate, recalculado no maximo a cada 8 s."""
+    stats = info.get("stats")
+    if not stats or not info.get("target_mbps"):
+        return None
+    c = _profile_cache.get(stats)
+    if c and now - c["t"] < 8:
+        return c["p"]
+    p = x265stats.profile(stats, info["target_mbps"], info.get("max_mbps"),
+                          info.get("fps") or 24, current=current)
+    if p:  # nunca guardar um resultado vazio: a passada 1 ainda pode nao ter gravado nada
+        _profile_cache[stats] = {"t": now, "p": p}
+    return p
+
+
+def frame_from_encode(info, job):
+    """Em que frame o encode esta, sem depender de log nenhum.
+
+    Passada 1: o x265 escreve uma linha por frame no arquivo de estatisticas.
+    Passada 2: o .hevc cresce, e o tamanho ja escrito diz o frame, porque a
+    previsao de bits por frame veio da passada 1.
+    """
+    stats = info.get("stats")
+    hevc = info.get("hevc")
+    if not stats:
+        # uma passada so: o tamanho ja escrito diz o frame quando ha bitrate-alvo
+        if hevc and info.get("target_mbps") and os.path.exists(hevc):
+            try:
+                bits = os.path.getsize(hevc) * 8
+            except OSError:
+                return None, None
+            per_frame = info["target_mbps"] * 1e6 / (info.get("fps") or 24)
+            return int(bits / per_frame), "bytes"
+        return None, None
+    if info.get("pass_no") == 1:
+        frames, _complete = x265stats.read(stats)
+        return (len(frames), "stats") if frames else (None, None)
+    if info.get("pass_no") == 2 and hevc and os.path.exists(hevc):
+        cum = x265stats.cumulative_bits(stats, info.get("target_mbps") or 0,
+                                        info.get("max_mbps"), info.get("fps") or 24)
+        try:
+            size = os.path.getsize(hevc)
+        except OSError:
+            return None, None
+        f = x265stats.frame_from_bytes(cum, size)
+        return (f, "hevc") if f else (None, None)
+    return None, None
+
+
 def build_job(proc, now):
+    info = encoder_info(proc.get("encoder_args", ""))
     job = {
         "pid": proc["pid"],
         "output": proc["output"],
@@ -247,13 +348,22 @@ def build_job(proc, now):
         "partial": partial_output(proc["output"]),
         "fast_first_pass": proc.get("fast_first_pass", False),
         "eta_total_max": None,
+        "gui": proc.get("gui", False),
+        "tool": proc.get("tool"),
+        "source": info.get("source"),
+        "target_mbps": info.get("target_mbps"),
+        "max_mbps": info.get("max_mbps"),
+        "fps_video": info.get("fps") or 24,
+        "frame_src": "log",
+        "profile": None,
+        "fps_typical": None,
     }
     if job["started"]:
         job["elapsed"] = now - job["started"]
     lines, _size = read_log(proc["log"]) if proc["log"] else ([], None)
+    stage_start_from_log = None
     if not lines:
-        job["stage"] = "sem log para acompanhar"
-        return job
+        return finish_job(job, info, proc, now)
 
     last = next((l for l in reversed(lines) if PCT_RE.search(CTRL_RE.sub("", l))), lines[-1])
     stage = stage_of(last)
@@ -329,6 +439,8 @@ def build_job(proc, now):
             "estimated": st not in first_seen,
         })
 
+    finish_job(job, info, proc, now)
+    rate = job["fps_typical"] or job["fps_now"] or job["fps_avg"]
     if job["frame"] and job["frames"] and rate:
         left_stage = (job["frames"] - job["frame"]) / rate
         job["eta_stage"] = left_stage
@@ -348,9 +460,42 @@ def build_job(proc, now):
     return job
 
 
+def finish_job(job, info, proc, now):
+    """Completa o que o log nao deu, usando o proprio encode."""
+    if not job["frames"]:
+        job["frames"] = info.get("frames_total")
+    if not job["pass_no"] and info.get("pass_no"):
+        job["pass_no"] = info["pass_no"]
+        job["pass_of"] = 2
+    exact, src = frame_from_encode(info, job)
+    if exact and (not job["frame"] or src == "stats"):
+        job["frame"], job["frame_src"] = exact, src
+    if not job["stage"]:
+        if job["pass_no"]:
+            job["stage"] = "Pass %d of %d: x265 %s" % (
+                job["pass_no"], job["pass_of"] or 2,
+                "medindo a imagem" if job["pass_no"] == 1 else "gravando o vídeo")
+        elif proc.get("tool"):
+            job["stage"] = proc["tool"]
+        elif proc.get("busy"):
+            job["stage"] = "trabalhando"
+        else:
+            job["stage"] = "parado, esperando você"
+    if job["frame"] and not job["fps_now"]:
+        samples = load_samples(proc["pid"])
+        samples = save_sample(proc["pid"],
+                              {"t": now, "stage": job["stage"], "frame": job["frame"]},
+                              samples)
+        job["fps_now"] = fps_window(samples, job["stage"])
+        if not job["fps_typical"]:
+            job["fps_typical"] = job["fps_now"]
+    job["profile"] = profile_cached(info, job["frame"], now)
+    return job
+
+
 def status():
     now = time.time()
-    procs, apps = find_processes()
+    procs = find_processes()
     jobs = [build_job(p, now) for p in procs]
     load = os.getloadavg()
     return {
@@ -360,8 +505,39 @@ def status():
         "cores": os.cpu_count(),
         "load": [round(x, 2) for x in load],
         "jobs": jobs,
-        "apps": apps,
+        "stats_error": x265stats.last_error,
     }
+
+
+_frame_cache = {}
+
+
+def grab_frame(pid, source, frame, fps):
+    """Extrai a imagem do frame que o encode esta processando agora.
+
+    Uma extracao a cada 12 s, no maximo, com uma thread so: o render nem
+    sente. A fonte e PQ/HDR; a curva aqui e so para dar para enxergar numa
+    tela comum, nao e conversao de cor para valer.
+    """
+    if not source or frame is None or not os.path.exists(source):
+        return None
+    os.makedirs(STATE, exist_ok=True)
+    out = os.path.join(STATE, "frame-%d.jpg" % pid)
+    c = _frame_cache.get(pid)
+    now = time.time()
+    if c and now - c["t"] < FRAME_MIN_INTERVAL and os.path.exists(out):
+        return out
+    _frame_cache[pid] = {"t": now, "frame": frame}
+    r = subprocess.run([
+        "ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
+        "-ss", "%.3f" % (frame / float(fps or 24)), "-i", source,
+        "-frames:v", "1", "-vf",
+        "scale=640:-2,format=yuv420p,curves=all=0/0 0.2/0.45 0.5/0.78 1/1,"
+        "eq=contrast=1.12:saturation=1.25",
+        "-q:v", "5", "-y", out], capture_output=True, timeout=60)
+    if r.returncode != 0 and not os.path.exists(out):
+        return None
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -372,6 +548,20 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
             self.send_file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
+        elif path == "/frame.jpg":
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                pid = int(q.get("pid", ["0"])[0])
+            except ValueError:
+                pid = 0
+            job = next((j for j in status()["jobs"] if j["pid"] == pid), None)
+            f = grab_frame(pid, job and job.get("source"),
+                           job and job.get("frame"),
+                           job and job.get("fps_video")) if job else None
+            if not f:
+                self.send_error(404)
+                return
+            self.send_file(f, "image/jpeg")
         elif path == "/status.json":
             body = json.dumps(status()).encode()
             self.send_response(200)

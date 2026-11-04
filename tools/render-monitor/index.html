@@ -69,6 +69,15 @@
   .empty{color:var(--ink-2);padding:8px 0}
   svg .grid{stroke:var(--line);stroke-width:1}
   svg .line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  svg .area{fill:var(--accent);opacity:.14;stroke:none}
+  svg .ref{stroke:var(--ink-3);stroke-width:1;stroke-dasharray:3 3;opacity:.6}
+  svg .ref.cap{stroke:var(--crit);opacity:.5}
+  svg .cursor{stroke:var(--accent);stroke-width:2}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:14px}
+  .two.frame img{width:100%;border-radius:8px;display:block;background:var(--surface-2)}
+  .pct2{font-size:34px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .pct2 span{font-size:15px;font-weight:500;color:var(--ink-2);margin-left:4px}
+  @media (max-width:720px){ .two{grid-template-columns:1fr} }
   svg text{fill:var(--ink-3);font-size:10.5px}
   .note{color:var(--ink-2);font-size:12.5px;margin-top:10px;padding-left:10px;border-left:2px solid var(--warn)}
   .note b{color:var(--ink)}
@@ -81,6 +90,7 @@
     <h1>BROS-MUX — Monitor de render</h1>
     <div class="sub" id="meta">conectando…</div>
   </header>
+  <div id="err"></div>
   <div id="jobs"></div>
   <div class="sec">Sessões de render abertas</div>
   <div class="card" id="sessions"></div>
@@ -109,6 +119,11 @@ function clock(t){
 }
 function n(v,d=1){ return v==null?"—":v.toLocaleString("pt-BR",{minimumFractionDigits:d,maximumFractionDigits:d}); }
 function int(v){ return v==null?"—":v.toLocaleString("pt-BR"); }
+function tcf(f,fps){
+  if(f==null) return "—";
+  const s=Math.floor(f/(fps||24)), h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
+  return (h?h+":":"")+String(m).padStart(2,"0")+":"+String(x).padStart(2,"0");
+}
 function gb(b){ return b==null?"—":(b/1e9).toFixed(2).replace(".",",")+" GB"; }
 
 function spark(hist){
@@ -127,6 +142,58 @@ function spark(hist){
     <text x="${P}" y="${H-4}">${clock(t0)}</text>
     <text x="${W-8}" y="${H-4}" text-anchor="end">${clock(t1)}</text>
   </svg>`;
+}
+
+function bitrateChart(j){
+  const p=j.profile;
+  if(!p || !p.buckets.length) return "";
+  const W=900,H=190,L=46,R=10,T=14,B=26;
+  const total=j.frames||p.buckets[p.buckets.length-1].f;
+  const top=Math.max(p.max_mbps||0, ...p.buckets.map(b=>b.mbps))*1.05;
+  const x=f=>L+(f/total)*(W-L-R);
+  const y=v=>T+(1-v/top)*(H-T-B);
+  const step=(p.buckets[1]?p.buckets[1].f-p.buckets[0].f:1);
+  let d="M"+x(0).toFixed(1)+","+y(0).toFixed(1);
+  p.buckets.forEach(b=>{ d+=" L"+x(b.f).toFixed(1)+","+y(b.mbps).toFixed(1)+" L"+x(b.f+step).toFixed(1)+","+y(b.mbps).toFixed(1); });
+  const lastf=p.buckets[p.buckets.length-1].f+step;
+  const area=d+" L"+x(lastf).toFixed(1)+","+y(0).toFixed(1)+" Z";
+  const hits=p.buckets.map(b=>`<rect x="${x(b.f).toFixed(1)}" y="${T}" width="${Math.max(1,(x(step)-x(0))).toFixed(1)}" height="${H-T-B}" fill="transparent"><title>${tcf(b.f,j.fps_video)} · ${b.mbps.toLocaleString("pt-BR")} Mbps</title></rect>`).join("");
+  const line=(v,lab,cls)=>v?`<line class="ref ${cls||''}" x1="${L}" y1="${y(v).toFixed(1)}" x2="${W-R}" y2="${y(v).toFixed(1)}"/><text x="${L-6}" y="${(y(v)+4).toFixed(1)}" text-anchor="end">${lab}</text>`:"";
+  const cur=j.frame!=null?`<line class="cursor" x1="${x(j.frame).toFixed(1)}" y1="${T-6}" x2="${x(j.frame).toFixed(1)}" y2="${H-B}"/>`:"";
+  return `<div class="sec">Bitrate que cada cena vai receber na passada 2 — estimativa</div>
+  <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="bitrate estimado por cena ao longo do filme">
+    <path class="area" d="${area}"/><path class="line" d="${d}"/>
+    ${line(p.max_mbps,p.max_mbps+" teto","cap")}${line(p.target_mbps,p.target_mbps+" alvo")}
+    ${cur}${hits}
+    <text x="${L}" y="${H-6}">00:00</text>
+    <text x="${W-R}" y="${H-6}" text-anchor="end">${tcf(total,j.fps_video)}</text>
+  </svg>
+  <div class="barlab"><span>${p.frames_measured.toLocaleString("pt-BR")} frames já medidos · ${p.scenes} cenas${p.complete?"":" · a passada 1 ainda está medindo, os números ainda mudam"}</span><span>média ${n(p.avg_mbps)} Mbps</span></div>`;
+}
+
+function sceneTables(j){
+  const p=j.profile; if(!p) return "";
+  const row=s=>`<tr><td>${tcf(s.start,j.fps_video)}</td><td>${Math.round(s.frames/(j.fps_video||24))} s</td><td><b>${n(s.mbps)}</b> Mbps</td></tr>`;
+  return `<div class="two">
+    <div><div class="sec">Cenas mais pesadas</div><table>${p.heaviest.map(row).join("")}</table></div>
+    <div><div class="sec">Cenas mais leves</div><table>${p.lightest.map(row).join("")}</table></div>
+  </div>`;
+}
+
+function framePane(j){
+  const sc=j.profile && j.profile.scene_now;
+  return `<div class="two frame">
+    <div><img id="img${j.pid}" src="/frame.jpg?pid=${j.pid}&t=${Math.floor(Date.now()/12000)}" alt="frame ${j.frame}">
+      <div class="barlab"><span>frame ${int(j.frame)} · ${tcf(j.frame,j.fps_video)}</span><span>atualiza a cada 12 s</span></div></div>
+    <div>
+      <div class="sec">Cena de agora</div>
+      ${sc?`<div class="pct2">${n(sc.mbps)}<span>Mbps</span></div>
+        <div class="sub">é o que a passada 2 deve dar para esta cena — a ${sc.rank}ª mais pesada de ${j.profile.scenes} medidas até aqui.</div>
+        <div class="sub" style="margin-top:6px">Começou em ${tcf(sc.start,j.fps_video)} e dura ${Math.round(sc.frames/(j.fps_video||24))} s (${sc.frames} frames).</div>
+        ${j.profile.lag_frames>240?`<div class="sub" style="margin-top:6px;color:var(--ink-3)">O x265 grava as estatísticas em blocos, então esta cena é a de ${tcf(j.frame-j.profile.lag_frames,j.fps_video)}, não a da imagem ao lado (${tcf(j.frame,j.fps_video)}). Na passada 2 some esse atraso.</div>`:""}`
+        :'<div class="empty">Esperando as estatísticas da passada 1.</div>'}
+    </div>
+  </div>`;
 }
 
 function jobCard(j,now){
@@ -178,6 +245,9 @@ function jobCard(j,now){
     </div>
     ${spark(j.fps_history)}
     ${slow}
+    ${framePane(j)}
+    ${bitrateChart(j)}
+    ${sceneTables(j)}
     <div class="sec">Tempo decorrido em cada etapa</div>
     <table><thead><tr><th>Etapa</th><th>Começou</th><th>Durou</th><th>Estado</th></tr></thead>
     <tbody>${stages||'<tr><td class="name">—</td><td>—</td><td>—</td><td>—</td></tr>'}</tbody></table>
@@ -190,17 +260,19 @@ async function tick(){
   try{ s = await (await fetch("/status.json",{cache:"no-store"})).json(); }
   catch(e){ $("#meta").innerHTML = '<span class="dot off"></span>monitor fora do ar'; return; }
   const run = s.jobs.length>0;
-  $("#meta").innerHTML = `<span class="dot ${run?"":"off"}"></span>${s.host} · ${s.chip} · ${s.cores} núcleos · carga ${s.load[0]} · ${run?s.jobs.length+" render rodando":"nenhum render rodando"}`;
-  $("#jobs").innerHTML = run ? s.jobs.map(j=>jobCard(j,s.now)).join("")
-    : '<div class="card empty">Nenhum job do BROS-MUX rodando agora. A página se atualiza sozinha quando um começar.</div>';
-  const rows = [
-    ...s.jobs.map(j=>({n:"Render (linha de comando) — "+j.title, pid:j.pid, st:j.started, el:j.elapsed, cpu:j.cpu})),
-    ...s.apps.map(a=>({n:"BROS-MUX (app aberto)", pid:a.pid, st:null, el:null, cpu:a.cpu}))
-  ];
+  $("#meta").innerHTML = `<span class="dot ${run?"":"off"}"></span>${s.host} · ${s.chip} · ${s.cores} núcleos · carga ${s.load[0]} · ${run?s.jobs.length+(s.jobs.length>1?" processos":" processo")+" do BROS-MUX":"BROS-MUX fechado"}`;
+  const working = s.jobs.filter(j=>j.frame!=null||j.tool);
+  $("#jobs").innerHTML = working.length ? working.map(j=>jobCard(j,s.now)).join("")
+    : `<div class="card empty">${run?"O BROS-MUX está aberto e parado — nada sendo processado agora.":"Nenhum BROS-MUX rodando. A página se atualiza sozinha quando você abrir um."}</div>`;
+  const rows = s.jobs.map(j=>({
+    n:(j.gui?"BROS-MUX aberto por você":"Render pela linha de comando")+(j.title&&j.title!=="BROS-MUX job"?" — "+j.title:""),
+    pid:j.pid, st:j.started, el:j.elapsed, cpu:j.cpu, stage:j.stage }));
   $("#sessions").innerHTML = rows.length? `<table>
-      <thead><tr><th>Sessão</th><th>pid</th><th>Começou</th><th>Decorrido</th><th>CPU</th></tr></thead>
-      <tbody>${rows.map(r=>`<tr><td class="name">${r.n}</td><td>${r.pid}</td><td>${clock(r.st)}</td><td>${hms(r.el)}</td><td>${r.cpu?Math.round(r.cpu)+"%":"—"}</td></tr>`).join("")}</tbody></table>`
+      <thead><tr><th>Sessão</th><th>Fazendo</th><th>pid</th><th>Começou</th><th>Decorrido</th><th>CPU</th></tr></thead>
+      <tbody>${rows.map(r=>`<tr><td class="name">${r.n}</td><td class="name">${r.stage||"—"}</td><td>${r.pid}</td><td>${clock(r.st)}</td><td>${hms(r.el)}</td><td>${r.cpu?Math.round(r.cpu)+"%":"—"}</td></tr>`).join("")}</tbody></table>`
     : '<div class="empty">Nada do BROS-MUX aberto.</div>';
+  $("#err").innerHTML = s.stats_error
+    ? `<div class="note">Não consegui ler o arquivo de estatísticas do x265: ${s.stats_error}. O gráfico de bitrate por cena fica de fora até isso voltar.</div>` : "";
   $("#foot").textContent = "Atualizado às "+clock(s.now)+" · a página se atualiza a cada 3 s · só leitura, não interfere no render.";
 }
 tick(); setInterval(tick,3000);
