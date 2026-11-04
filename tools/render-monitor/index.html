@@ -46,10 +46,10 @@
   .bar i{display:block;background:var(--accent);height:100%;border-radius:5px}
   .bar i.ghost{background:var(--accent-soft)}
   .barlab{display:flex;justify-content:space-between;color:var(--ink-3);font-size:11.5px}
-  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:1px;
-        background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden;
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));
+        background:var(--surface);border:1px solid var(--line);border-radius:10px;overflow:hidden;
         margin:16px 0}
-  .kpi{background:var(--surface);padding:11px 13px}
+  .kpi{padding:11px 13px;box-shadow:inset 1px 0 0 var(--line),inset 0 1px 0 var(--line)}
   .kpi b{display:block;font-size:21px;font-weight:620;letter-spacing:-.02em;
          font-variant-numeric:tabular-nums}
   .kpi small{display:block;color:var(--ink-2);font-size:11.5px;margin-top:2px}
@@ -70,7 +70,9 @@
   svg .grid{stroke:var(--line);stroke-width:1}
   svg .line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
   svg text{fill:var(--ink-3);font-size:10.5px}
-  .note{color:var(--warn);font-size:12.5px;margin-top:10px}
+  .note{color:var(--ink-2);font-size:12.5px;margin-top:10px;padding-left:10px;border-left:2px solid var(--warn)}
+  .note b{color:var(--ink)}
+  .note code{font-size:11.5px;background:var(--surface-2);padding:1px 5px;border-radius:4px}
 </style>
 </head>
 <body>
@@ -87,6 +89,12 @@
 <script>
 const $ = (s,r=document)=>r.querySelector(s);
 
+function hmsc(s){  // compacto, para faixas: 5h54
+  if(s==null||!isFinite(s)) return "—";
+  s=Math.max(0,Math.round(s));
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
+  return h? h+"h"+String(m).padStart(2,"0") : m+" min";
+}
 function hms(s){
   if(s==null||!isFinite(s)) return "—";
   s=Math.max(0,Math.round(s));
@@ -142,8 +150,14 @@ function jobCard(j,now){
       <td>${hms(s.elapsed)}</td>
       <td><span class="tag ${s.state==='atual'?'now':'done'}">${s.state}</span></td>
     </tr>`).join("");
-  const slow = j.fps_now && j.fps_avg && j.fps_now < j.fps_avg*0.8
-    ? `<div class="note">O fps de agora (${n(j.fps_now)}) está abaixo da média da passada (${n(j.fps_avg)}): a cena atual é mais pesada, ou a máquina/disco estão disputados. O tempo restante aqui já usa o fps de agora.</div>` : "";
+  const notes = [];
+  if(j.fps_avg && j.fps_typical && j.fps_avg > j.fps_typical*1.15)
+    notes.push(`A <b>média desde o início</b> (${n(j.fps_avg)} fps) está acima do ritmo real (${n(j.fps_typical)} fps) porque o começo do filme — preto e créditos — correu muito rápido. Ela vai descendo sozinha até encostar no ritmo real; <b>não é queda de desempenho</b>. A conta de tempo aqui usa o fps típico, não a média.`);
+  if(j.fps_now && j.fps_typical && j.fps_now < j.fps_typical*0.75)
+    notes.push(`O fps de agora (${n(j.fps_now)}) está abaixo do típico (${n(j.fps_typical)}): a cena atual é mais pesada que a média do filme.`);
+  if(j.fast_first_pass && j.pass_no===1)
+    notes.push(`A passada 1 roda com análise reduzida (<code>slow-firstpass=0</code>) e por isso é rápida. A <b>passada 2 usa o preset <i>slow</i> inteiro e deve levar de 2 a 3,5 vezes mais tempo</b> — é essa faixa que está no "falta até o fim". Quando a passada 2 começar, a conta passa a usar a velocidade medida dela.`);
+  const slow = notes.map(t=>`<div class="note">${t}</div>`).join("");
   return `<div class="card">
     <h2>${j.title}</h2>
     <div class="path">${j.output||""} · pid ${j.pid} · log ${j.log||"—"}</div>
@@ -154,12 +168,13 @@ function jobCard(j,now){
     <div class="bar">${segs}</div>
     <div class="barlab"><span>início ${clock(j.started)}</span><span>frame ${int(j.frame)} de ${int(j.frames)}</span></div>
     <div class="kpis">
-      <div class="kpi"><b>${n(j.fps_now)}</b><small>fps agora (90 s)</small></div>
-      <div class="kpi"><b>${n(j.fps_avg)}</b><small>fps médio da passada</small></div>
+      <div class="kpi"><b>${n(j.fps_now)}</b><small>fps agora</small></div>
+      <div class="kpi"><b>${n(j.fps_typical)}</b><small>fps típico (base da conta)</small></div>
+      <div class="kpi"><b>${n(j.fps_avg)}</b><small>fps médio desde o início</small></div>
       <div class="kpi"><b><em>${hms(j.elapsed)}</em></b><small>decorrido no trabalho</small></div>
       <div class="kpi"><b><em>${hms(j.eta_stage)}</em></b><small>falta nesta passada</small></div>
-      <div class="kpi"><b><em>${hms(j.eta_total)}</em></b><small>falta até o fim</small></div>
-      <div class="kpi"><b><em>${j.eta_total?clock(now+j.eta_total):"—"}</em></b><small>término previsto</small></div>
+      <div class="kpi"><b><em>${j.eta_total_max?hmsc(j.eta_total)+" a "+hmsc(j.eta_total_max):hms(j.eta_total)}</em></b><small>falta até o fim</small></div>
+      <div class="kpi"><b><em>${j.eta_total?clock(now+j.eta_total)+(j.eta_total_max?" – "+clock(now+j.eta_total_max):""):"—"}</em></b><small>término previsto</small></div>
     </div>
     ${spark(j.fps_history)}
     ${slow}

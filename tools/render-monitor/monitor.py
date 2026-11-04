@@ -85,6 +85,10 @@ def find_processes():
     # ffmpeg/x265 por job
     for j in jobs:
         j["cpu_encoder"] = sum(c for _p, pp, c, a in rows if pp == j["pid"] and "ffmpeg" in a)
+        enc = next((a for _p, pp, _c, a in rows if pp == j["pid"] and "ffmpeg" in a), "")
+        # x265 roda a passada 1 com analise reduzida (slow-firstpass=0): a
+        # passada 2, no preset cheio, e bem mais lenta que a 1.
+        j["fast_first_pass"] = "slow-firstpass=0" in enc
     return jobs, apps
 
 
@@ -110,6 +114,37 @@ def read_log(path):
         return [], None
     lines = [l.strip() for l in data.replace("\r", "\n").split("\n") if l.strip()]
     return lines, size
+
+
+def log_curve(lines, stage, now):
+    """Curva de fps da etapa atual, tirada do proprio log.
+
+    Cada linha de progresso traz `frame N of M` e o fps medio acumulado: o
+    tempo decorrido na etapa e frame/fps_medio. Dai sai o fps instantaneo
+    entre duas linhas, desde o comeco da etapa.
+    """
+    pts = []
+    for l in lines:
+        l = CTRL_RE.sub("", l)
+        if stage_of(l) != stage:
+            continue
+        mf, mr = FRAME_RE.search(l), FPS_RE.search(l)
+        if not (mf and mr):
+            continue
+        frame, avg = num(mf.group(1)), float(mr.group(1))
+        if avg > 0:
+            pts.append((frame / avg, frame))
+    if len(pts) < 2:
+        return [], None
+    start = now - pts[-1][0]
+    hist, prev = [], pts[0]
+    for el, frame in pts[1:]:
+        if el - prev[0] < 55 and (el, frame) != pts[-1]:
+            continue
+        if el > prev[0] and frame > prev[1]:
+            hist.append({"t": start + el, "fps": (frame - prev[1]) / (el - prev[0])})
+        prev = (el, frame)
+    return hist, start
 
 
 def samples_path(pid):
@@ -210,6 +245,8 @@ def build_job(proc, now):
         "pass_of": None,
         "fps_history": [],
         "partial": partial_output(proc["output"]),
+        "fast_first_pass": proc.get("fast_first_pass", False),
+        "eta_total_max": None,
     }
     if job["started"]:
         job["elapsed"] = now - job["started"]
@@ -238,16 +275,14 @@ def build_job(proc, now):
     samples = save_sample(proc["pid"], {"t": now, "stage": stage, "frame": job["frame"]}, samples)
     job["fps_now"] = fps_window(samples, stage)
 
-    # historico de fps instantaneo (um ponto por ~30 s, ultimos 40 pontos)
-    pts = [s for s in samples if s.get("stage") == stage and s.get("frame")]
-    hist, prev = [], None
-    for s in pts:
-        if prev and s["t"] - prev["t"] >= 25 and s["frame"] > prev["frame"]:
-            hist.append({"t": s["t"], "fps": (s["frame"] - prev["frame"]) / (s["t"] - prev["t"])})
-            prev = s
-        elif prev is None:
-            prev = s
-    job["fps_history"] = hist[-40:]
+    curve, stage_start_from_log = log_curve(lines, stage, now)
+    job["fps_history"] = curve[-60:]
+    if job["fps_now"] is None and curve:
+        job["fps_now"] = curve[-1]["fps"]
+    # fps tipico: mediana dos ultimos 20 min, que e o ritmo real do filme
+    recent = sorted(h["fps"] for h in curve if now - h["t"] <= 1200) or \
+             sorted(h["fps"] for h in curve[-12:])
+    job["fps_typical"] = recent[len(recent) // 2] if recent else None
 
     # etapas: ordem de aparicao no log + duracao
     order, seen = [], set()
@@ -264,19 +299,15 @@ def build_job(proc, now):
         if st and st not in first_seen:
             first_seen[st] = s["t"]
 
-    # ritmo para o tempo restante: mediana do fps recente (estavel), senao o de agora
-    recent = sorted(h["fps"] for h in job["fps_history"][-8:])
-    if len(recent) >= 3:
-        rate = recent[len(recent) // 2]
-    else:
-        rate = job["fps_now"] or job["fps_avg"]
+    rate = job["fps_typical"] or job["fps_now"] or job["fps_avg"]
     starts = {}
     for st in order:
         if st in first_seen:
             starts[st] = first_seen[st]
     # etapa atual com contador de frames: deduz o inicio pelo fps medio
-    if job["frame"] and job["fps_avg"]:
-        est = now - job["frame"] / job["fps_avg"]
+    if stage_start_from_log or (job["frame"] and job["fps_avg"]):
+        est = stage_start_from_log if stage_start_from_log \
+            else now - job["frame"] / job["fps_avg"]
         if stage not in starts or starts[stage] > est:
             starts[stage] = est
     if order and order[0] not in starts and job["started"]:
@@ -301,11 +332,14 @@ def build_job(proc, now):
     if job["frame"] and job["frames"] and rate:
         left_stage = (job["frames"] - job["frame"]) / rate
         job["eta_stage"] = left_stage
-        total = left_stage
+        total = total_max = left_stage
         if job["pass_no"] and job["pass_of"] and job["pass_of"] > job["pass_no"]:
-            total += (job["pass_of"] - job["pass_no"]) * job["frames"] / rate
-            total += 240  # mux + injecao do RPU
+            rest = (job["pass_of"] - job["pass_no"]) * job["frames"] / rate
+            lo, hi = (2.0, 3.5) if job["fast_first_pass"] else (1.0, 1.15)
+            total += rest * lo + 240      # 240 s = mux + injecao do RPU
+            total_max += rest * hi + 240
         job["eta_total"] = total
+        job["eta_total_max"] = total_max if total_max > total * 1.02 else None
         if job["pass_no"] and job["pass_of"]:
             done = (job["pass_no"] - 1 + job["frame"] / job["frames"]) / job["pass_of"]
             job["pct_total"] = round(done * 100, 1)
