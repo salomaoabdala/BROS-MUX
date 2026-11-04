@@ -4,6 +4,35 @@ Regra do dono (2026-11-04): existe uma sessão fixa, "BROS-MUX Updates" (Fable 5
 
 Coordenação: a sessão "BROS-MUX: agrupar WAVs mono em um 5.1" já publicou o `qc.sh`, o `qc/`, a regra no `CLAUDE.md`, o README e o `.gitignore` (commit 4fcf7ef, 2026-11-04) e, até a sessão Updates existir, revisa e commita os diffs das outras sessões depois do `./qc.sh`. Avisar antes de editar; a partir da v1.7 a sessão Updates é a dona das releases.
 
+
+## BUG CONFIRMADO: a marcação de cor do encode HDR está errada (2026-11-04)
+
+Achado ao religar o encode do 2DIE4 e confirmado por três caminhos independentes: leitura da norma, leitura do código do x265, e o registro que o **próprio x265 gravou** no `x265.stats` da passada 1 do 2DIE4 — que é o que ele realmente usou:
+
+    colorprim=12   (P3-D65)      → deveria ser 9 (BT.2020)
+    transfer=16    (PQ)          → certo
+    colormatrix=1  (BT.709)      → deveria ser 9 (BT.2020 não constante)
+    chromaloc=0                  → deveria ser 2
+    range=0        (limited)     → certo
+    master-display P3-D65        → certo, é o lugar do P3 e não muda
+
+E no stderr do encode, do próprio x265: **`Disabling hdr10-opt`**. Ou seja, o `hdr10-opt=1` que o app passa **não faz nada** desde sempre: o x265 só o aceita com 4:2:0 + 10 bits + primárias 9 + transfer 16 + matriz 9, e desliga em silêncio fora disso (a mensagem sai como ERROR mas o encode continua).
+
+**A causa, no nosso código:** `Transcode.swift:341`
+
+    if matrix == nil || src.isRGB || rgbSource || src.primaries == nil { matrix = primaries == "bt2020" ? "bt2020nc" : "bt709" }
+
+A regra "a matriz segue as primárias" manda P3-D65 → BT.709. Para qualquer saída PQ/HDR a matriz é `bt2020nc`, não importa a primária da fonte: **não existe matriz Y'CbCr padronizada para P3-D65** (SMPTE ST 2067-21:2020, Tabela 3, EXAMPLE 1, diz textualmente que P3-D65 com componentes Y'CbCr não é suportado). A camada base de um Dolby Vision 8.1 é um HDR10, e HDR10 é BT.2020; a tabela `dovi[]` do x265 para o perfil 8.1 é `{transfer 16, primaries 9, matrix 9, full_range 0}`.
+
+**Efeito colateral:** como `isBT2020` (`Transcode.swift:345`) testa `primaries == "bt2020"`, com `smpte432` ele fica false e o app pula o chroma siting UHD (`Transcode.swift:509`) e o `chromaloc=2` (`Transcode.swift:542`). Um erro arrasta o outro.
+
+**O arquivo não está internamente incoerente:** `Transcode.swift:507` converte RGB→YCbCr com a mesma matriz BT.709 que grava na etiqueta, então um player que respeita a etiqueta reconstrói a imagem certa. O risco é de ecossistema — um player que assuma BT.2020 (como o perfil 8.1 permite supor) aplica a matriz errada, com desvio de matiz e saturação visível em vermelhos, cianos e magentas saturados.
+
+**A correção NÃO é só trocar a etiqueta.** Os valores de pixel são primárias P3-D65; rotulá-los BT.2020 sem converter expande o gamut e satura tudo — fica pior que hoje. Precisa de conversão de primárias em luz linear (`zscale`/libzimg, que o pipeline não usa hoje: `Transcode.swift:507` é swscale, que converte matriz e não primária), ou que o master saia do Resolve já em BT.2020/PQ. **Masters já codificados assim precisam ser reencodados; não há atalho.**
+
+Relacionado: o `CODE-REVIEW-2026-11-03.md:62` já apontava outro sintoma da mesma falta de uma regra de cor única e correta (fontes HLG/Rec.709 saindo rotuladas PQ/BT.2020).
+
+
 ## Na fila
 
 1. **Medidor de alinhamento** — **commitado em ffd65a2** no `plano-transcode` (2026-11-04 10:40, pela sessão "agrupar WAVs mono"; `origin/plano-transcode` = ffd65a2, `origin/main` segue em 4fcf7ef, v1.6). Conteúdo: `Alignment.swift`; linha "Alignment meter" no painel Sync (recalcula ao digitar o Head trim); mensagem do Picture check (aba Mux, pós-mux e `--picture`); item "Sound vs picture" no Render QC; "Align" sugere o corte que alinha a maior parte do filme quando as medições discordam; `--job --trim-ms N` e `--no-source-audio`; corte exato de E-AC-3 (frame inteiro + start delay); seek de 1/4 de frame no Picture check. Testado na CLI com o 2DIE4; `./qc.sh` aprovado duas vezes no código commitado (30 ok, 1 aviso esperado de "Em desenvolvimento", 0 falhas; capturas em `qc/out/shots`, anteriores em `qc/out/previous`). Já está no CHANGELOG em "Em desenvolvimento" — entra na v1.7. **Pendência:** o bundle em `/Applications` ainda é o build anterior (sem o semáforo do medidor, a constante seekBefore e os textos do painel Sync e do Sync Viewer); reinstalar na v1.7 ou depois do encode DV. Fora do commit, untracked: `SoundEncode.swift.wip` e `SoundUI.swift.wip` (não mexer).
@@ -11,7 +40,9 @@ Coordenação: a sessão "BROS-MUX: agrupar WAVs mono em um 5.1" já publicou o 
 2. **Avaliação medida dos modos de bitrate, por preset** (pedido do dono). No painel HDR da aba Mux e no inspector do Transcode (`HDR.swift`, `RateControlRows`), ao escolher um modo (Quality/CRF, Average/2-pass VBR, Constant/CBR) e um preset (Streaming 4K, Blu-ray, UHD Blu-ray, Kaleidescape 4K Cinematic, Master file), o app explica o que o modo faz e dá uma avaliação **medida para aquele preset**: quanto tempo a mais o 2-pass leva em relação ao CRF e ao CBR; quão perto o CRF chega do 2-pass VBR em **"Perceived Quality"**. Esclarecimento do dono (2026-11-04): **não é um preset novo nem uma opção** — é uma frase que aparece ao clicar no modo mais rápido, dizendo que ele tem X % da perceived quality do modo mais top (o 2-pass VBR) naquele preset, por exemplo "CRF: 95% of the perceived quality of 2-pass VBR for this preset, N× faster" (a porcentagem vem do VMAF e do PSNR medidos, mais os Mbps reais); e que o CBR é o mais rápido e previsível, porém o mais pesado. Texto em inglês, por preset × modo, com a data e a máquina da medição (Apple M4 Max, 16 núcleos, 64 GB — Mac Studio, a máquina de trabalho desde 2026-11-04).
    - Benchmark (só com a máquina livre — `pgrep -fl "BROS-MUX --job"` e carga do ffmpeg antes; nunca durante um encode do dono): amostra de **5 a 10 minutos** do master HDR `/Volumes/A018/2DIE4_UHD_HDR_PR4444/2DIE4_UHD_P3D65_PR444_51_20260212.mov` (trecho com detalhe, sujeira e movimento), recortada sem recompressão (`-c copy`) para o scratchpad. Para cada preset × modo (CRF no mesmo bitrate-alvo, 2-pass, CBR): tempo de encode (relógio e fps), bitrate real, PSNR e VMAF (`--vmaf` do Transcode / libvmaf do ffmpeg). Cuidar do espaço em disco (`df`) e **apagar todos os temporários no fim**. Resultados em `BENCHMARK-BITRATE.md` no repo.
 
-3. Pedidos novos do dono: entram aqui.
+3. **Retomar o trabalho depois de um crash** (pedido do dono, 2026-11-04). Se o BROS-MUX cair no meio de um Transcode (ou de um encode HDR/DV no Mux), for fechado sem querer ou parado, ao reabrir ele tem que **ver a sessão interrompida e oferecer continuar de onde parou**, sem perder o que já foi feito. Caso real que motivou: o app caiu logo depois de terminar a passada 1 de um 2-pass VBR (2 h de trabalho); o `x265.stats` e os dados da passada 1 estavam inteiros no disco, então dava para ir direto à passada 2 — mas o app não sabia retomar. Objetivo: deixar o programa à prova de crash, de bug e de parada acidental. Plano detalhado (pesquisa feita por um agente) em `PLANO-RETOMAR.md`; o que for decidido lá entra aqui como itens da v1.7.
+
+4. Pedidos novos do dono: entram aqui.
 
 ## Rotina
 
