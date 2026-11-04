@@ -136,9 +136,9 @@ final class SyncViewerModel: Identifiable {
 
     /// samples removed from the head of the track (negative = the sound starts later), nudge preview included
     var cut: Int { (target?.trimStart ?? 0) + nudge }
-    /// what is really applied: E-AC-3 is cut only on whole 1536-sample Dolby frames, rounded down (as JobRunner does);
-    /// a delay (negative) is a start delay in the container, so it needs no rounding
-    func effective(_ c: Int) -> Int { isDolby && c > 0 ? c / 1536 * 1536 : c }
+    /// what is really applied: exact — E-AC-3 is cut on whole 1536-sample Dolby frames (one more than asked) and the rest is a
+    /// start delay in the container (Project.plan), and a delay (negative) is a start delay too, so nothing is rounded any more
+    func effective(_ c: Int) -> Int { c }
     var effectiveCut: Int { effective(cut) }
     var baseEffectiveCut: Int { effective(target?.trimStart ?? 0) }
     /// how late the reference is vs its own picture (s) — set in the Sync panel
@@ -372,7 +372,9 @@ struct SyncViewerSheet: View {
     var moveText: String {
         let c = model.effectiveCut
         let s = Double(abs(c)) / model.sampleRate
-        let unit = model.isDolby ? String(format: " (%d Dolby frames of 32 ms)", abs(c) / 1536) : " (\(Fmt.int(abs(c))) samples)"
+        let unit = model.isDolby ? (abs(c) % 1536 == 0 ? String(format: " (%d whole Dolby frames of 32 ms)", abs(c) / 1536)
+                                                      : String(format: " (%d whole Dolby frames of 32 ms cut, the %@ samples left over as a start delay in the container — exact)", abs(c) / 1536 + 1, Fmt.int(1536 - abs(c) % 1536)))
+                                 : " (\(Fmt.int(abs(c))) samples)"
         if c > 0 { return String(format: "BROS-MUX removes %.3f s%@ from its head → its sound moves %.3f s EARLIER and lines up with the picture.", s, unit, s) }
         if c < 0 && model.isDolby { return String(format: "BROS-MUX makes it start %.3f s later with a start delay in the container (edit list — no Dolby frame is touched) → its sound moves %.3f s LATER and lines up with the picture.", s, s) }
         if c < 0 { return String(format: "BROS-MUX adds %.3f s of silence%@ at its head → its sound moves %.3f s LATER and lines up with the picture.", s, unit, s) }
@@ -382,7 +384,6 @@ struct SyncViewerSheet: View {
     func residualText(_ r: Double) -> String {
         if abs(r) < 0.05 { return "After the trim: exact sync (0.00 ms)." }
         var s = String(format: "After the trim: the sound is %.1f ms %@ (%.2f frame).", abs(r), r > 0 ? "late" : "early", abs(r) / 1000 * model.fps)
-        if model.isDolby { s += r > 0 ? " Dolby audio can only be cut on whole 32 ms frames, rounded so the sound is late, never early." : " Dolby audio can only be cut on whole 32 ms frames; ▶ makes it start later (a start delay in the container)." }
         if r <= 45 && r >= -15 { s += " Well inside what viewers can notice (ITU-R BT.1359: 45 ms early / 125 ms late)." }
         return s
     }

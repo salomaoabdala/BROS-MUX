@@ -722,9 +722,9 @@ struct SyncPanel: View {
             Text("Sync")
         } footer: {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Lines up the waveforms: slides each track's waveform against the reference's (cross-correlation) at 15 points spread evenly over the film and finds the exact offset, down to one sample. Trimming is lossless: sample exact for PCM, 32 ms Dolby frames for Atmos (the sound is never early), and a track that has to start later gets silence at the head (PCM) or a start delay in the container (Atmos, no frame touched). The reference itself is not muxed. The audio is lined up with audio; “Picture Check…” lines it up with the image (hard cuts vs sound hits), and the same check runs on the muxed file.")
+                Text("Lines up the waveforms: slides each track's waveform against the reference's (cross-correlation) at 15 points spread evenly over the film and finds the exact offset, down to one sample. Trimming is lossless and exact: sample exact for PCM; Atmos (E-AC-3) is cut in whole 32 ms Dolby frames and the rest of the trim is a start delay in the container, so no frame is touched; a track that has to start later gets silence at the head (PCM) or a start delay in the container (Atmos). The reference itself is not muxed. The audio is lined up with audio; “Picture Check…” lines it up with the image (hard cuts vs sound hits), and the same check runs on the muxed file.")
                 if !viewerTargets.isEmpty {
-                    Text("* Tolerance: the sound may be at most 15 ms early or 45 ms late vs the picture (ATSC IS-191, the broadcast limit; viewers start to notice at about 45 ms early / 125 ms late, ITU-R BT.1359). Dolby audio is cut in whole 32 ms frames, so up to 32 ms late after the trim is normal and inside the tolerance.")
+                    Text("* Tolerance: the sound may be at most 15 ms early or 45 ms late vs the picture (ATSC IS-191, the broadcast limit; viewers start to notice at about 45 ms early / 125 ms late, ITU-R BT.1359).")
                 }
             }
         }
@@ -740,9 +740,10 @@ struct SyncLights: View {
 
     var body: some View {
         let sr = track.sampleRate > 0 ? track.sampleRate : 48000
-        let cut = track.codecKey == "eac3" && track.trimStart > 0 ? track.trimStart / 1536 * 1536 : track.trimStart
+        let applied = project.plan(for: track).map { Double($0.cut - $0.pad) } ?? Double(track.trimStart)   // samples, as it will be muxed
         let before = track.syncLag.map { ($0 + project.referenceOffset) * 1000 }
-        let after = track.syncLag.map { ($0 + project.referenceOffset - Double(cut) / sr) * 1000 }
+        let after = track.syncLag.map { ($0 + project.referenceOffset - applied / sr) * 1000 }
+        let meter = project.alignmentMeter(for: track)
         VStack(alignment: .leading, spacing: 3) {
             Text(track.title).font(.subheadline.weight(.semibold)).lineLimit(1)
             HStack(spacing: 6) { light(before); Text(text(before, "as delivered")).font(.caption) }
@@ -750,6 +751,10 @@ struct SyncLights: View {
             if let a = after, !Self.ok(a) {
                 Text(a < Self.early ? (track.isPCM || track.codecKey == "eac3" ? "Early: nudge it later in the Sync Viewer." : "Early: a compressed track can't be delayed without re-encoding.") : "Still late: nudge it in the Sync Viewer.")
                     .font(.caption).foregroundStyle(.red)
+            }
+            if let m = meter {   // the alignment meter: how much of the film this trim aligns, and where it drifts (updates as the trim is typed)
+                HStack(spacing: 6) { light(m.drifts.first.map { $0.residual * 1000 } ?? 0); Text("Alignment meter: " + m.summary).font(.caption) }   // red on the first stretch out of sync (signed: an early one is red too)
+                    .help(m.lines.joined(separator: "\n") + "\n" + m.note)
             }
         }
     }
