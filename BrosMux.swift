@@ -129,7 +129,7 @@ enum Tools {
 enum Fmt {
     static func bitrate(_ bps: Double) -> String {
         if bps >= 1_000_000 { return String(format: "%.1f Mbps", bps / 1_000_000) }
-        return String(format: "%.0f kbps", bps / 1000)
+        return String(format: "%.0f Kbps", bps / 1000)
     }
     static func bytes(_ b: Double) -> String {
         let f = ByteCountFormatter(); f.countStyle = .file
@@ -1562,7 +1562,7 @@ enum Academy {
                 if isProRes { c.append(Check(level: .fail, title: "\(n) · AAC", detail: "With ProRes the Academy requires PCM")) }
                 else {
                     let good = ((ch == 6 && br >= 630_000) || (ch == 2 && br >= 250_000)) && sr == 48000 && (a["Format_Profile"] ?? "LC").contains("LC")
-                    c.append(Check(level: good ? .ok : .warn, title: "\(n) · AAC", detail: "\(Fmt.bitrate(br)) · \(Fmt.hz(sr)) · \(ch) ch (AAC LC 640k for 5.1 or 256k for stereo, 48 kHz)"))
+                    c.append(Check(level: good ? .ok : .warn, title: "\(n) · AAC", detail: "\(Fmt.bitrate(br)) · \(Fmt.hz(sr)) · \(ch) ch (AAC LC 640 Kbps for 5.1 or 256 Kbps for stereo, 48 kHz)"))
                 }
             } else {
                 c.append(Check(level: .fail, title: "\(n) · \(a["Format_Commercial_IfAny"] ?? a["Format"] ?? "?")",

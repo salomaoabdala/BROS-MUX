@@ -13,10 +13,24 @@ Regra fixa do projeto, pedida pelo dono. Vale para toda versão nova, sem exceç
    - escrever a mensagem de commit no formato `v1.x: resumo`;
    - na resposta ao dono, listar exatamente o que entrou, mudou e foi corrigido, igual ao `CHANGELOG.md`.
 
+## Como uma atualização é feita e publicada
+
+Regra do dono (2026-11-04): ele pede as mudanças, o Claude faz tudo de uma vez e publica, sem ficar perguntando a cada passo.
+
+1. **Juntar tudo numa versão só** e implementar de uma vez. Perguntar só o que muda o resultado e não dá para decidir sozinho; nunca pedir confirmação para compilar, commitar, dar push ou publicar.
+2. **Compilar e testar**: `./build.sh` (só Apple Silicon), os testes do que mudou, e instalar em `/Applications` (`rm -rf /Applications/BROS-MUX.app && ditto build.noindex/BROS-MUX.app /Applications/BROS-MUX.app`).
+3. **Assim que a compilação terminar e os testes passarem, publicar o update no GitHub**, sem pedir autorização:
+   - commit `v1.x: resumo` e push do branch de trabalho;
+   - zip do app: `ditto -c -k --keepParent build.noindex/BROS-MUX.app dist/BROS-MUX-v1.x.zip`;
+   - tag `v1.x` e Release "BROS-MUX v1.x" (`gh release create`) com o zip e notas em português tiradas do `CHANGELOG.md`: uma linha de resumo, os itens principais e, no fim, "Instalar: baixe o zip, descompacte e arraste o BROS-MUX.app para /Applications (ou `./install.sh` depois do `git pull`)." O `install.sh` baixa sempre o Release mais recente;
+   - merge no `main` só quando o dono disser (a Release pode sair do branch de trabalho).
+4. **Na resposta**, listar o que entrou, mudou e foi corrigido, igual ao `CHANGELOG.md`, com o link da Release.
+
 ## Regras do app
 
 - **Aba Mux:** nada é recomprimido; as faixas só são juntadas. A única exceção é a recodificação automática para Dolby Vision/HDR10+, e ela tem que ser sempre anunciada com clareza, dizendo o que a ligou e mostrando fonte → destino.
-- **Aba Transcode** (planejada em `PLANO-TRANSCODE.md`): é o único lugar onde codec, qualidade, tamanho, resolução e cor podem mudar.
+- **Aba Transcode** (planejada em `PLANO-TRANSCODE.md`, implementada na v1.6): é o único lugar onde codec, qualidade, tamanho, resolução e cor podem mudar.
 - Não espalhar funções entre abas. Cada aba faz uma coisa só e diz isso no topo.
 - O app nunca altera a mixagem nem os arquivos de origem.
 - A interface fica em inglês; a documentação (README, CHANGELOG, planos), em português.
+- **Unidades:** bitrate (o que define o tamanho do arquivo final) em **Mbps** e **Kbps**; velocidade de leitura, gravação e transferência em **MB/s** e **KB/s**. Nunca "Mb/s", "kb/s" nem "MiB".
