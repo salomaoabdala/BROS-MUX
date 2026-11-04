@@ -35,6 +35,17 @@ Regra do dono (2026-11-04): ele pede as mudanças, o Claude faz tudo de uma vez,
    - tag `v1.x` e Release "BROS-MUX v1.x" (`gh release create`) com o zip e notas em português tiradas do `CHANGELOG.md`: uma linha de resumo, os itens principais, "Requer um Mac com Apple Silicon…" e, no fim, "Instalar: baixe o zip, descompacte e arraste o BROS-MUX.app para /Applications (ou `./install.sh` depois do `git pull`)." O `install.sh` baixa sempre o Release mais recente.
 6. **Na resposta**, listar o que entrou, mudou e foi corrigido, igual ao `CHANGELOG.md`, o resultado do QC e o link da Release.
 
+## Quem mexe no monitor de render
+
+Combinado em 2026-11-04, com o dono: o `tools/render-monitor/` (mais o `monitor.command` e o `.claude/launch.json`) é da **sessão master**, que é quem reporta o andamento dos encodes para o dono e precisa responder pelos números que aparecem na tela. Outra sessão que for mexer ali avisa a master no mesmo minuto, para ela revisar antes de o dono olhar.
+
+Duas coisas que já custaram caro:
+
+- O frame mostrado vem do **log do job**, que é ao vivo. O `x265.stats` é gravado em blocos de 4 MiB e fica até ~3.000 frames (2 min) atrás: serve para o bitrate por cena, não para dizer onde o encode está.
+- Nada no monitor pode disputar com o encode: contas caras levam cache (o `cumulative_bits` custa 0,4 s por chamada com um filme inteiro, e a página pede status a cada 3 s) e a leitura do disco de trabalho é esporádica.
+
+O servidor não sobe pelo painel de preview do Claude: ali ele perde a permissão do macOS para ler `/Volumes` e o gráfico de cenas morre com "Operation not permitted". Use o `monitor.command` ou `nohup python3 tools/render-monitor/monitor.py &` pelo terminal.
+
 ## Regras do app
 
 - **Aba Mux:** nada é recomprimido; as faixas só são juntadas. A única exceção é a recodificação automática para Dolby Vision/HDR10+, e ela tem que ser sempre anunciada com clareza, dizendo o que a ligou e mostrando fonte → destino.
