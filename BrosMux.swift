@@ -942,6 +942,8 @@ enum SyncEngine {
         let valid: Int
         let spreadMs: Double
         let message: String
+        /// the points good enough to trust: decent correlation and a peak that stands out from the runner-up
+        var reliable: [Point] { points.filter { $0.corr >= 0.45 && $0.corr >= $0.second * 1.3 } }
     }
     struct Source {
         let url: URL; let index: Int; let duration: Double; var channels = 0
@@ -2137,7 +2139,8 @@ final class JobRunner {
                     // QuickTime makes the movie run at the picture's clock, e.g. 2400/s) rounded to under half a millisecond
                     options.append("delay=\(plan.pad)/\(Int(sr))")
                     options.append("moovts=-1")
-                    note = "“\(t.title)”: starts \(String(format: "%.3f", Double(plan.pad) / sr)) s later by a start delay in the container (edit list, no frame touched)" +
+                    note = "“\(t.title)”: " + (s.skippedAUs > 0 ? "cut \(s.skippedAUs) Dolby frames (\(String(format: "%.3f", Double(s.skippedSamples) / sr)) s) from the head, then " : "") +
+                        "starts \(String(format: "%.3f", Double(plan.pad) / sr)) s later by a start delay in the container (edit list, no frame touched)" + (s.skippedAUs > 0 ? " — exact alignment" : "") +
                         (tailFrames > 0 ? "; \(tailFrames) Dolby frames cut from the tail" : "") + " — frames copied byte for byte"
                 }
                 return Prepared(path: gpacTmp.appendingPathComponent(dst.lastPathComponent).path, selector: nil, rangeEnd: nil,
@@ -2370,6 +2373,13 @@ final class Project {
     var includedCount: Int { included.count }
     var audioTracks: [Track] { tracks.filter { $0.kind == .audio } }
     var reference: Track? { tracks.first { $0.id == syncReferenceID && $0.kind == .audio } }
+    /// How much of the film a track is aligned with its trim as it will be muxed (from the points “Align” measured; Alignment.swift)
+    func alignmentMeter(for t: Track) -> Alignment.Meter? {
+        guard !t.syncPoints.isEmpty, t.sampleRate > 0, let p = plan(for: t) else { return nil }
+        let pts = t.syncPoints.filter { $0.corr >= 0.45 && $0.corr >= $0.second * 1.3 }.map { Alignment.Point(time: $0.time, lag: $0.lag + referenceOffset) }
+        let dur = videoDuration > 0 ? videoDuration : t.duration
+        return Alignment.measure(points: pts, applied: Double(p.cut - p.pad) / t.sampleRate, fps: videoFPS.value, duration: dur)
+    }
     var videoTrack: Track? { included.first { $0.kind == .video } }
     var busy: Bool { state == .running || aligning || loadingCount > 0 }
 
@@ -2766,8 +2776,14 @@ final class Project {
     func plan(for t: Track) -> TrimPlan? {
         guard t.kind == .audio, t.sampleRate > 0 else { return nil }
         let total = t.totalSamples
-        let pad = max(0, -t.trimStart)
-        let cut = min(max(0, t.trimStart), max(0, total - 1))
+        var pad = max(0, -t.trimStart)
+        var cut = min(max(0, t.trimStart), max(0, total - 1))
+        if t.codecKey == "eac3", cut % 1536 != 0, cut + 1536 < total {
+            // Dolby frames (1536 samples, 32 ms) are only cut whole: one frame more than asked is cut and the sound starts
+            // later by the difference (a start delay in the container), so the alignment is exact instead of up to 32 ms late
+            let up = (cut / 1536 + 1) * 1536
+            pad = up - cut; cut = up
+        }
         var keep = total - cut
         if matchVideoEnd, t.canTrim, let v = videoTrack, v.duration > 0 {   // (TrueHD can't be cut: it keeps its length)
             let target = Int((Double(videoFrames) / videoFPS.value * t.sampleRate).rounded())   // video length, in samples
@@ -2782,7 +2798,7 @@ final class Project {
         var parts: [String] = []
         let dolby = t.codecKey == "eac3"
         if p.cut > 0 {
-            if dolby {   // only whole 1536-sample frames can be cut, rounded down (as JobRunner does)
+            if dolby {   // whole 1536-sample frames are cut (one more than asked; the rest is a start delay — Project.plan), rounded down only within a frame of the end
                 let frames = p.cut / 1536, lateMs = Double(p.cut - frames * 1536) / sr * 1000
                 parts.append(String(format: "trims %.3f s from the head (%d whole 32 ms Dolby frames", Double(frames * 1536) / sr, frames) +
                              (lateMs >= 0.05 ? String(format: " → the sound stays %.1f ms late, never early)", lateMs) : ")"))
@@ -2809,7 +2825,7 @@ final class Project {
         aligning = true; alignLines = []; alignProgress = 0
         let flag = CancelFlag(); alignCancel = flag
         DispatchQueue.global(qos: .userInitiated).async {
-            let results = Project.align(reference: ref, targets: targets, cancel: flag, offset: self.referenceOffset) { s, p in
+            let results = Project.align(reference: ref, targets: targets, cancel: flag, offset: self.referenceOffset, fps: self.videoFPS.value, duration: self.videoDuration) { s, p in
                 DispatchQueue.main.async { self.alignStage = s; self.alignProgress = p }
             }
             DispatchQueue.main.async {
@@ -2837,7 +2853,7 @@ final class Project {
 
     /// Measures each track against the reference and returns how much to trim (in samples of the track)
     /// `offset`: how late (s) the reference is vs its own picture — added to every trim so the tracks follow the picture
-    static func align(reference ref: Track, targets: [Track], cancel: CancelFlag, offset: Double = 0,
+    static func align(reference ref: Track, targets: [Track], cancel: CancelFlag, offset: Double = 0, fps: Double = 24, duration: Double = 0,
                       stage: @escaping (String, Double) -> Void) -> [AlignResult] {
         var out: [AlignResult] = []
         for (n, t) in targets.enumerated() {
@@ -2846,8 +2862,16 @@ final class Project {
             let r = SyncEngine.measure(ref: SyncEngine.Source(ref), cand: SyncEngine.Source(t), rate: sr, cancel: cancel) { p in
                 stage("Measuring “\(t.title)” (\(n + 1) of \(targets.count))…", p)
             }
+            // the alignment meter: every reliable point, as a lag vs the picture (the reference may itself be late vs its picture)
+            let apts = r.reliable.map { Alignment.Point(time: $0.time, lag: $0.lag + offset) }
+            let dur = duration > 0 ? duration : min(ref.duration, t.duration)
             guard let lag = r.lag else {
-                out.append(AlignResult(id: t.id, samples: nil, note: "Not aligned: \(r.message)", line: "“\(t.title)”: not aligned — \(r.message)", points: r.points))
+                var msg = r.message
+                if let best = Alignment.bestCorrection(points: apts, fps: fps, duration: dur),
+                   let m = Alignment.measure(points: apts, applied: best, fps: fps, duration: dur), m.spans.count > 1 {
+                    msg += String(format: " · No single offset fits everywhere. The one that aligns the most film is a head trim of %+.1f ms: %@ — type it in “Head trim (ms)” to use it.", best * 1000, m.summary)
+                }
+                out.append(AlignResult(id: t.id, samples: nil, note: "Not aligned: \(msg)", line: "“\(t.title)”: not aligned — \(msg)", points: r.points))
                 continue
             }
             let samples = Int(((lag + offset) * Double(sr)).rounded())
@@ -2861,7 +2885,8 @@ final class Project {
                          lag, samples, r.inliers, r.points.count, r.spreadMs)
                 : String(format: "Measured %+.6f s vs the reference + %.3f ms because the reference is late vs its picture → trim %+.6f s (%d samples) · %d of %d points agree · spread ±%.2f ms",
                          lag, offset * 1000, lag + offset, samples, r.inliers, r.points.count, r.spreadMs)
-            out.append(AlignResult(id: t.id, samples: samples, note: note, line: "“\(t.title)”: " + note, lag: lag, points: r.points))
+            let meter = Alignment.measure(points: apts, applied: Double(samples) / Double(sr), fps: fps, duration: dur).map { " · " + $0.summary } ?? ""
+            out.append(AlignResult(id: t.id, samples: samples, note: note + meter, line: "“\(t.title)”: " + note + meter, lag: lag, points: r.points))
         }
         return out
     }
@@ -3164,6 +3189,8 @@ struct CLIArgs {
     var refLateFrames = 0.0
     var channelOrder: String?            // "--channel-order \"L C R Ls Rs LFE\"": listen to each PCM track and write its channels in this order
     var pictureCheck = true
+    var sourceAudio = true               // --no-source-audio: the sound inside the movie file is not muxed; it stays the sync reference
+    var trimMs: Double?                  // --trim-ms N: head trim typed by hand (ms; negative = the sound starts later) for every muxed audio track
 
     init(_ a: [String]) {
         var i = 0
@@ -3199,6 +3226,8 @@ struct CLIArgs {
             case "--ref-late-frames": refLateFrames = Double(next() ?? "") ?? 0
             case "--channel-order": channelOrder = next()
             case "--no-picture-check": pictureCheck = false
+            case "--no-source-audio": sourceAudio = false
+            case "--trim-ms": trimMs = Double(next() ?? "")
             case "--write-report": writeReport = next()
             default: break
             }
@@ -3235,6 +3264,15 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
         }
     }
     project.autoGroup()
+    if !a.sourceAudio {
+        // the sound that came inside the movie file stays out of the mux and serves as the sync reference —
+        // also when its mono streams became a 5.1 group (makeGroup brings a 5.1 back in as a deliverable)
+        let videos = Set(a.steps.filter { $0.0 == "video" }.map { URL(fileURLWithPath: $0.1).path })
+        for i in project.tracks.indices where project.tracks[i].kind == .audio && videos.contains(project.tracks[i].url.path) {
+            project.tracks[i].include = false
+            if project.syncReferenceID == nil { project.syncReferenceID = project.tracks[i].id }
+        }
+    }
     if let l = a.lang { for i in project.tracks.indices where project.tracks[i].kind == .audio { project.tracks[i].language = l } }
     var titles = a.audioTitles[...]
     for i in project.tracks.indices where project.tracks[i].kind == .audio && project.tracks[i].include {
@@ -3295,7 +3333,7 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
         let targets = project.tracks.filter { $0.kind == .audio && $0.include && $0.id != ref.id }
         print("Aligning \(targets.count) track(s) to the reference “\(ref.title)” (\(ref.url.lastPathComponent))" +
               (a.refLateFrames == 0 ? "…" : String(format: ", which is %g frame(s) late vs its picture…", a.refLateFrames)))
-        let results = Project.align(reference: ref, targets: targets, cancel: CancelFlag(), offset: project.referenceOffset) { _, _ in }
+        let results = Project.align(reference: ref, targets: targets, cancel: CancelFlag(), offset: project.referenceOffset, fps: project.videoFPS.value, duration: project.videoDuration) { _, _ in }
         for r in results {
             if let i = project.tracks.firstIndex(where: { $0.id == r.id }) {
                 if let s = r.samples { project.tracks[i].trimStart = s }
@@ -3308,6 +3346,14 @@ func buildProject(_ a: CLIArgs, output: String?) -> Project {
         }
         project.alignLines = results.map(\.line)
     }
+    if let ms = a.trimMs {
+        // a head trim typed by hand, like the “Head trim (ms)” field: the alignment meter says how much of the film it aligns
+        for i in project.tracks.indices where project.tracks[i].kind == .audio && project.tracks[i].include && project.tracks[i].id != project.syncReferenceID {
+            project.tracks[i].trimStartMs = ms
+            project.tracks[i].syncApplied = true
+            print(String(format: "  • “%@”: head trim set by hand to %+.3f ms", project.tracks[i].title, ms) + (project.alignmentMeter(for: project.tracks[i]).map { " · " + $0.summary } ?? ""))
+        }
+    }
     return project
 }
 
@@ -3315,7 +3361,7 @@ func runJobCLI(_ args: [String]) -> Int32 {
     let a = CLIArgs(args)
     // never fall back to a default destination from the command line — an explicit -o is required
     guard let o = a.output, ["mov", "mp4", "mkv"].contains((o as NSString).pathExtension.lowercased()) else {
-        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft --rate crf|2pass|cbr --mbps N --max-mbps N --no-floor] (an explicit -o is required)"); return 2
+        print("usage: --job -o OUT.mov|OUT.mp4|OUT.mkv [--video V | --imf PACKAGE] [--add A]… [--align] [--no-source-audio] [--trim-ms N] [--encode --dv XML|MXF --hdr10plus JSON --quality master|maximum|high|compact --speed slow|medium|fast|draft --rate crf|2pass|cbr --mbps N --max-mbps N --no-floor] (an explicit -o is required)"); return 2
     }
     let project = buildProject(a, output: a.output)
     print("\nTRACKS:")
@@ -3571,6 +3617,10 @@ func pictureCLI(_ args: [String]) -> Int32 {
         let ok = r.offset.map { $0 * 1000 >= -15 && $0 * 1000 <= 45 } ?? false
         print("\(ok ? (r.confident ? "✓" : "⚠") : "✗") \(lane.label)" + (lane.shift != 0 ? String(format: " (read %+.3f s later)", lane.shift) : "") + ": \(r.message)")
         for (i, h) in r.points.enumerated() { print(String(format: "     check point %2d: cut %@  hit %+.0f ms (%.0f dB)", i + 1, Fmt.duration(h.cut), (h.onset - h.cut) * 1000, h.rise)) }
+        if let m = r.meter {   // the alignment meter, window by window
+            for l in m.lines { print("     meter: " + l) }
+            print("     meter: " + m.note)
+        }
         if args.contains("--verbose") {
             print("     groups: " + r.groups.prefix(6).map { String(format: "%+.0f ms (%.1f · %d cuts / %d win)", $0.lag * 1000, $0.value, $0.count, $0.windows) }.joined(separator: " · "))
             for (c, pk) in zip(cuts, r.peaks) {

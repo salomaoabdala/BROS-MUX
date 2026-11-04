@@ -34,6 +34,8 @@ enum PictureSync {
         var peaks: [[(lag: Double, rise: Double)]] = []   // per cut: its strongest sound rises (lag from the cut, dB)
         var groups: [Group] = []       // groups of agreeing cuts, strongest first (the first one is the answer)
         var confident = false          // the best group clearly beats the next one
+        var windows: [Alignment.Point] = []   // per window of the film: the lag its cuts vote for most (windows with no vote are left out)
+        var meter: Alignment.Meter? = nil     // how much of the film is aligned, and where it drifts (Alignment.swift)
     }
     static let range = 0.25            // s searched each side of a cut
     static let thumbW = 96, thumbH = 54
@@ -49,6 +51,11 @@ enum PictureSync {
         return (0..<points).map { i in Segment(start: lo + (hi - lo) * Double(i) / Double(max(1, points - 1)), length: win) }
     }
 
+    /// Why the seeks start a QUARTER frame before the wanted frame, not half: ffmpeg drops the frames before `-ss` after
+    /// converting it to the stream's time base (1/24 for a 24 fps MOV). Written with six decimals, (f0 − 0.5)/24 lands on
+    /// either side of the rounding — 30465.499992 rounds down and frame 30465 comes out first, one frame too early —
+    /// which moved every cut of some windows by a frame (seen on 2DIE4, 2026-11-04). (f0 − 0.25)/fps always rounds to f0.
+    static let seekBefore = 0.25
     /// Hard cuts: a frame that differs a lot from the previous one while the next one doesn't (a flash fails that test)
     static func detectCuts(video: URL, index: Int, fps: Double, segments: [Segment], cancel: CancelFlag,
                            progress: (Double) -> Void) -> [Cut] {
@@ -58,7 +65,7 @@ enum PictureSync {
         for (k, seg) in segments.enumerated() {
             if cancel.isSet { break }
             let f0 = Int((seg.start * fps).rounded())
-            let ss = (Double(f0) - 0.5) / fps               // half a frame early: the first frame out is f0
+            let ss = (Double(f0) - seekBefore) / fps        // a quarter frame early: the first frame out is f0 (see `seekBefore`)
             let args = ["-nostdin", "-v", "error", "-ss", String(format: "%.6f", max(0, ss)), "-t", String(format: "%.6f", seg.length + 1 / fps),
                         "-i", video.path, "-map", "0:\(index)", "-fps_mode", "passthrough", "-vf", "scale=\(thumbW):\(thumbH):flags=area,format=gray",
                         "-f", "rawvideo", "-pix_fmt", "gray", "-"]
@@ -139,7 +146,7 @@ enum PictureSync {
     }
 
     /// Where do the sound hits land relative to the picture cuts? The lag with the most rise under the cuts wins.
-    static func match(cuts: [Cut], curves: [OnsetCurve], fps: Double) -> Result {
+    static func match(cuts: [Cut], curves: [OnsetCurve], fps: Double, duration: Double = 0) -> Result {
         var r = Result(); r.cuts = cuts.count
         guard cuts.count >= 3 else { r.message = "Not enough hard cuts found in the picture (\(cuts.count))."; return r }
         let bins = Int(range * 2000) + 1                    // 1 ms steps
@@ -218,6 +225,28 @@ enum PictureSync {
         // the answer is the group that more DIFFERENT parts of the film agree with (a sync offset is global; archive
         // footage with its own sync, or a montage, is local), then the one with more cuts
         r.groups = raw.prefix(8).map(group).sorted { $0.windows != $1.windows ? $0.windows > $1.windows : ($0.count != $1.count ? $0.count > $1.count : $0.value > $1.value) }
+        // the alignment meter: which of the film-wide candidates each window votes for on its own (a window that votes for
+        // none of them, or barely, is left out), in film order — a sync offset is global, so only those lags are plausible
+        var winPts: [Alignment.Point] = []
+        let candidates = r.groups.prefix(5).map(\.lag)
+        for (seg, sw) in perWindow {
+            // the window's vote for each candidate; it counts only when one candidate clearly wins inside the window
+            var votes: [(lag: Double, v: Double)] = []
+            for g in candidates {
+                let c = Int(((g + range) * 1000).rounded())
+                var lag = g, v = 0.0
+                for b in max(0, c - 12)...min(bins - 1, c + 12) where sw[b] > v { v = sw[b]; lag = Double(b) / 1000 - range }
+                votes.append((lag, v))
+            }
+            votes.sort { $0.v > $1.v }
+            guard let top = votes.first, top.v >= 1.0, votes.count < 2 || top.v >= 1.5 * votes[1].v else { continue }
+            let bestLag = top.lag
+            let times = used.filter { $0.segment == seg }.map(\.time)
+            winPts.append(Alignment.Point(time: times.reduce(0, +) / Double(max(1, times.count)), lag: bestLag))
+        }
+        r.windows = winPts.sorted { $0.time < $1.time }
+        let dur = duration > 0 ? duration : (used.map(\.time).max() ?? 0) + 30
+        if let m = Alignment.measure(points: r.windows, applied: 0, fps: fps, duration: dur), m.spans.count > 1 { r.meter = m }
         let chosen = r.groups[0]
         let lag = chosen.lag
         let next = r.groups.count > 1 ? r.groups[1] : nil
@@ -230,6 +259,7 @@ enum PictureSync {
         r.spreadMs = devs.isEmpty ? 0 : Fmt.median(devs)
         guard chosen.count >= 6, chosen.windows >= 4 else {
             r.message = String(format: "No clear match between picture cuts and sound changes (%d of %d cuts agree, from %d windows). Try more windows, or check the points by eye.", chosen.count, cuts.count, chosen.windows)
+            if let m = r.meter { r.message += " · window by window: " + m.summary }
             return r
         }
         r.confident = r.ratio >= 1.3 && chosen.windows >= 6
@@ -241,6 +271,7 @@ enum PictureSync {
         if let n = next, Double(n.windows) >= 0.7 * Double(chosen.windows) {
             r.message += String(format: " · another group of %d cuts (in %d windows) sits at %+.0f ms (%.1f frames): compare the two by eye", n.count, n.windows, n.lag * 1000, abs(n.lag * fps))
         } else if !r.confident { r.message += " · a thin margin: confirm by eye on the check points" }
+        if let m = r.meter { r.message += " · window by window: " + m.summary }
         return r
     }
 
@@ -252,7 +283,7 @@ enum PictureSync {
         if cancel.isSet { var r = Result(); r.message = "Cancelled."; return r }
         let curves = curvesFor(audio, segments: segs, shift: shift)
         progress("Matching sound hits to the cuts…", 0.95)
-        return match(cuts: cuts, curves: curves, fps: fps)
+        return match(cuts: cuts, curves: curves, fps: fps, duration: duration)
     }
 
     static func curvesFor(_ src: SyncEngine.Source, segments: [Segment], shift: Double) -> [OnsetCurve] {
@@ -269,7 +300,7 @@ enum PictureSync {
     /// Small RGB frames, letterboxed to a fixed size, from `firstFrame` on
     static func thumbnails(video: URL, index: Int, fps: Double, firstFrame: Int, count: Int, width: Int = 256, height: Int = 144) -> [CGImage] {
         guard let ffmpeg = Tools.ffmpeg, fps > 0, count > 0 else { return [] }
-        let ss = (Double(max(0, firstFrame)) - 0.5) / fps
+        let ss = (Double(max(0, firstFrame)) - seekBefore) / fps   // a quarter frame early (see `seekBefore`)
         let vf = "scale=\(width):\(height):force_original_aspect_ratio=decrease,pad=\(width):\(height):(ow-iw)/2:(oh-ih)/2,format=rgb24"
         let args = ["-nostdin", "-v", "error", "-ss", String(format: "%.6f", max(0, ss)), "-i", video.path, "-map", "0:\(index)",
                     "-fps_mode", "passthrough", "-frames:v", "\(count)", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
@@ -399,8 +430,7 @@ final class PictureSyncModel: Identifiable {
     /// what the trim moves the track by (s): positive = the source is read later
     func shift(of t: Track) -> Double {
         guard after, let p = project.plan(for: t), t.sampleRate > 0 else { return 0 }
-        let cut = t.codecKey == "eac3" ? p.cut / 1536 * 1536 : p.cut
-        return Double(cut - p.pad) / t.sampleRate
+        return Double(p.cut - p.pad) / t.sampleRate   // (E-AC-3: the plan already cuts whole Dolby frames and delays the rest)
     }
 
     func rebuildLanes() {

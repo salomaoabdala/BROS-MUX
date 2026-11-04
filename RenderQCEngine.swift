@@ -16,7 +16,7 @@ enum RenderQC {
              blackFrame = "Black frame", whiteFrame = "White frame", frozenFrame = "Repeated frame", bandArtifact = "Band / line artifact",
              blockArtifact = "Block artifact", timestampGap = "Timestamp gap", timestampDup = "Duplicate timestamp", avLength = "Audio/video length",
              audioDropout = "Audio dropout", audioClick = "Audio click", audioClipping = "Audio clipping", audioSilent = "Silent channel",
-             decodeError = "Decode problem"
+             decodeError = "Decode problem", sync = "Sound vs picture"
     }
     struct Finding: Identifiable {
         let id = UUID()
@@ -550,7 +550,7 @@ enum RenderQC {
 
     static func readText(url: URL, index: Int, frame: Int, fps: Double) -> [String] {
         guard let ffmpeg = Tools.ffmpeg else { return [] }
-        let ss = (Double(frame) - 0.5) / fps
+        let ss = (Double(frame) - PictureSync.seekBefore) / fps   // a quarter frame early: the first frame out is `frame` (PictureSync.seekBefore)
         let w = 960, h = 540
         guard let d = Tools.runSync(ffmpeg, ["-nostdin", "-v", "error", "-ss", String(format: "%.6f", max(0, ss)), "-i", url.path, "-map", "0:\(index)", "-fps_mode", "passthrough",
                                               "-frames:v", "1", "-vf", "scale=\(w):\(h),format=gray", "-f", "rawvideo", "-pix_fmt", "gray", "-"]), d.count >= w * h,
@@ -564,7 +564,7 @@ enum RenderQC {
 
     // MARK: everything
 
-    static func run(url: URL, cancel: CancelFlag, progress: (String, Double) -> Void) -> Report? {
+    static func run(url: URL, cancel: CancelFlag, sync: Bool = true, progress: (String, Double) -> Void) -> Report? {
         guard let info = probe(url) else { return nil }
         var rep = Report(info: info)
         progress("Reading every frame…", 0)
@@ -597,7 +597,7 @@ enum RenderQC {
         for (k, a) in info.audioStreams.enumerated() {
             if cancel.isSet { return nil }
             let r = audioFindings(url: url, index: a.index, channels: a.channels, rate: a.rate, fps: info.fps, cancel: cancel) { s in
-                progress("Listening to audio track \(k + 1) of \(info.audioStreams.count)…", 0.8 + 0.2 * (Double(k) + min(1, s / max(1, info.duration))) / Double(info.audioStreams.count))
+                progress("Listening to audio track \(k + 1) of \(info.audioStreams.count)…", 0.8 + 0.12 * (Double(k) + min(1, s / max(1, info.duration))) / Double(info.audioStreams.count))
             }
             findings += r.findings.map { fd in var x = fd; x = Finding(kind: fd.kind, severity: fd.severity, frame: fd.frame, count: fd.count, time: fd.time, detail: "track \(k + 1): " + fd.detail, channel: fd.channel); return x }
             rep.audioSeconds = max(rep.audioSeconds, r.seconds)
@@ -605,6 +605,28 @@ enum RenderQC {
             if abs(r.seconds - videoSeconds) > 1.5 / info.fps {
                 findings.append(Finding(kind: .avLength, severity: abs(r.seconds - videoSeconds) > 0.5 ? .warning : .info, frame: 0, count: 0, time: min(r.seconds, videoSeconds),
                                         detail: String(format: "audio track %d lasts %.3f s, the picture %.3f s (%+.1f frames)", k + 1, r.seconds, videoSeconds, (r.seconds - videoSeconds) * info.fps)))
+            }
+        }
+        // the sound against the picture itself (PictureSync.swift): hard cuts vs sound hits, and the alignment meter —
+        // how much of the film is aligned and where it drifts
+        if sync, info.duration > 20, !info.audioStreams.isEmpty {
+            let segs = PictureSync.segments(duration: info.duration, points: 16, window: 20)
+            let cuts = PictureSync.detectCuts(video: url, index: info.videoIndex, fps: info.fps, segments: segs, cancel: cancel) { p in
+                progress("Checking the sound against the picture: hard cuts…", 0.92 + 0.06 * p)
+            }
+            if cancel.isSet { return nil }
+            for (k, a) in info.audioStreams.prefix(2).enumerated() {
+                progress("Checking the sound against the picture: track \(k + 1)…", 0.98)
+                let src = SyncEngine.Source(url: url, index: a.index, duration: a.duration, channels: a.channels)
+                let r = PictureSync.match(cuts: cuts, curves: PictureSync.curvesFor(src, segments: segs, shift: 0), fps: info.fps, duration: info.duration)
+                if cancel.isSet { return nil }
+                let severity: Severity
+                if let o = r.offset {
+                    let frac = r.meter?.alignedFraction ?? 1
+                    severity = !Alignment.ok(o) ? .error : frac >= 0.95 ? .info : .warning
+                } else { severity = .info }
+                let t0 = r.meter?.drifts.first?.from ?? 0
+                findings.append(Finding(kind: .sync, severity: severity, frame: Int(t0 * info.fps), count: 0, time: t0, detail: "track \(k + 1): " + r.message))
             }
         }
         rep.findings = findings.sorted { $0.severity != $1.severity ? $0.severity > $1.severity : $0.time < $1.time }
