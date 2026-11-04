@@ -192,10 +192,11 @@ def cumulative_bits(path, target_mbps, max_mbps, fps):
         size = os.path.getsize(f) if f else 0
     except OSError:
         size = 0
-    key = (path, size, target_mbps, max_mbps, fps)
+    key = (size, target_mbps, max_mbps, fps)
     with _lock:                      # nao segurar o lock durante o read(): ele pega o mesmo
-        if _cum_cache.get("key") == key:
-            return _cum_cache["value"]
+        hit = _cum_cache.get(path)   # uma entrada por job: dois encodes juntos nao se expulsam
+        if hit and hit[0] == key:
+            return hit[1]
     frames, _c = read(path)
     n = len(frames)
     if n < 2:
@@ -212,7 +213,7 @@ def cumulative_bits(path, target_mbps, max_mbps, fps):
         run += e
         out.append(run)
     with _lock:
-        _cum_cache["key"], _cum_cache["value"] = key, out
+        _cum_cache[path] = (key, out)
     return out
 
 
