@@ -77,6 +77,33 @@ struct NoticeRow: View {
     }
 }
 
+/// The fixed strip at the top of a tab: what this tab does, and nothing else
+struct TabStrip: View {
+    let symbol: String
+    let title: String
+    let text: String
+    let tint: Color
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: symbol).foregroundStyle(tint)
+                Text(title).fontWeight(.semibold)
+                Text(text).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .font(.callout)
+            .lineLimit(2)
+            .padding(.horizontal, DS.margin).padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(tint.opacity(0.08))
+            Divider()
+        }
+        .accessibilityElement(children: .combine)
+    }
+    static let mux = TabStrip(symbol: "checkmark.seal.fill", title: "Mux ·", text: "nothing is re-encoded — picture and sound go in and out bit for bit; tracks are only combined.", tint: .green)
+    static let transcode = TabStrip(symbol: "arrow.triangle.2.circlepath", title: "Transcode ·", text: "the file is re-encoded — codec, quality, size, resolution and colour can change. The original is never touched; a new file is always written.", tint: .orange)
+}
+
 // MARK: - Small pieces
 
 /// Settings-style icon tile: a white symbol on a coloured rounded square
