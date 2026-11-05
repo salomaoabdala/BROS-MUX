@@ -261,13 +261,14 @@ enum TrackKind: String {
         case .other: return "questionmark.square.dashed"
         }
     }
+    /// Cryo tokens (dark only): ice for the picture, pale ice for the sound, ink greys for the rest — never a status colour
     var color: Color {
         switch self {
-        case .video: return .blue
-        case .audio: return .purple
-        case .subtitle: return .teal
-        case .timecode: return .orange
-        case .other: return .gray
+        case .video: return Cryo.ice
+        case .audio: return Cryo.icePale
+        case .subtitle: return Cryo.ink
+        case .timecode: return Cryo.ink2
+        case .other: return Cryo.ink3
         }
     }
     var label: String {
@@ -1426,7 +1427,7 @@ enum Verifier {
 enum CheckLevel {
     case ok, warn, fail, info
     var icon: String { switch self { case .ok: return "checkmark.circle.fill"; case .warn: return "exclamationmark.triangle.fill"; case .fail: return "xmark.octagon.fill"; case .info: return "info.circle.fill" } }
-    var color: Color { switch self { case .ok: return .green; case .warn: return .orange; case .fail: return .red; case .info: return .blue } }
+    var color: Color { switch self { case .ok: return Cryo.pass; case .warn: return Cryo.attention; case .fail: return Cryo.fail; case .info: return Cryo.info } }
     var text: String { switch self { case .ok: return "PASS"; case .warn: return "WARN"; case .fail: return "FAIL"; case .info: return "INFO" } }
 }
 struct Check: Identifiable { let id = UUID(); let level: CheckLevel; let title: String; let detail: String }
@@ -1435,7 +1436,7 @@ enum AcademyLevel {
     case notApproved, accepted, preferred
     var emoji: String { switch self { case .notApproved: return "🔴"; case .accepted: return "🟡"; case .preferred: return "🟢" } }
     var title: String { switch self { case .notApproved: return "NOT APPROVED BY THE ACADEMY"; case .accepted: return "ACCEPTED SPECS"; case .preferred: return "PREFERRED SPECS" } }
-    var color: Color { switch self { case .notApproved: return .red; case .accepted: return Color(red: 0.86, green: 0.62, blue: 0.0); case .preferred: return .green } }
+    var color: Color { switch self { case .notApproved: return Cryo.fail; case .accepted: return Cryo.gold; case .preferred: return Cryo.pass } }
     var explanation: String {
         switch self {
         case .notApproved: return "At least one requirement fails — see the checks."
@@ -2816,20 +2817,25 @@ final class Project {
         return r
     }
 
-    func applyIMF(_ r: IMFLoad, check: Bool = true) {
+    /// `gui: true` (the window's routing): the encode is switched on through the Video tab's plan (`video.choose`), the only
+    /// writer of hdr.encode there — an IMF master can't be copied. The command line and a job rebuild keep `gui: false`.
+    func applyIMF(_ r: IMFLoad, check: Bool = true, gui: Bool = false) {
         r.notices.forEach { post($0, tab: .video, level: .warn) }
         guard let pkg = r.package, !r.tracks.isEmpty else { return }
         tracks.removeAll { $0.kind == .video }          // the IMF picture replaces any other video
         hdr.imf = pkg
         insert(r.tracks)
-        hdr.encode = true
-        hdr.autoEnabledBy = pkg.cpl
-        hdr.autoReason = "An IMF package was added. Its master picture (JPEG 2000 in MXF) plays nowhere, so a playback version is made: HEVC 10-bit" + (r.dv != nil ? " with the package's Dolby Vision metadata." : ".")
+        if !gui {
+            hdr.encode = true
+            hdr.autoEnabledBy = pkg.cpl
+            hdr.autoReason = "An IMF package was added. Its master picture (JPEG 2000 in MXF) plays nowhere, so a playback version is made: HEVC 10-bit" + (r.dv != nil ? " with the package's Dolby Vision metadata." : ".")
+        }
         hdr.applySourceMastering(videoTrack?.mi)
         if let dv = r.dv {
             hdr.dvSource = dv; hdr.dolbyVision = true
             if check { hdr.checkDolbyVision(width: videoWidth, height: videoHeight, frames: videoFrames) }
         }
+        if gui { video.choose(.hevcHDR, project: self) }
         // the playback file goes next to the package (never inside it), named after the CPL
         if !userChoseOutput {
             outputSource = r.tracks.first?.url
@@ -2837,22 +2843,16 @@ final class Project {
         }
     }
 
-    func loadIMF(_ u: URL) {
-        loadingCount += 1
-        notices.removeAll()
-        if case .done = state { state = .idle }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let r = Self.readIMF(u)
-            DispatchQueue.main.async { self.loadingCount -= 1; self.applyIMF(r); self.chooseDefaultReference() }
-        }
-    }
+    /// An IMF package from the window: read and placed by the routing rule, like any other picture
+    func loadIMF(_ u: URL) { routeFiles([u], from: .video) }
     var canRun: Bool { Tools.missing.isEmpty && outputURL != nil && includedCount > 0 && !busy }
 
     // MARK: tabs (Beta 2.0.0): notices per tab, the picture's own audio, routing
-    // Wave 0: the simplest versions with the contract's signatures; the model owner (E1) writes the real ones.
 
     func notices(for tab: AppMode) -> [ProjectNotice] { notices.filter { $0.tab == tab } }
+    /// A notice on one tab (the same text twice on one tab shows once)
     func post(_ text: String, tab: AppMode, level: CheckLevel = .info) {
+        guard !notices.contains(where: { $0.tab == tab && $0.text == text }) else { return }
         notices.append(ProjectNotice(tab: tab, text: text, level: level))
     }
 
@@ -2861,28 +2861,57 @@ final class Project {
         StreamKey(path: t.url.path, streams: t.isGroup ? t.members.map(\.streamIndex).sorted() : [t.streamIndex])
     }
     /// The track comes from the picture's own file (by file, not by fromVideoFile)
-    func isEmbedded(_ t: Track) -> Bool { videoSource.map { t.url == $0.url } ?? false }
+    func isEmbedded(_ t: Track) -> Bool { videoSource.map { t.url.path == $0.url.path } ?? false }
     /// The first video track, included or not
     var videoSource: Track? { tracks.first { $0.kind == .video } }
     var embeddedAudio: [Track] { tracks.filter { $0.kind == .audio && isEmbedded($0) } }
     var userAudio: [Track] { tracks.filter { $0.kind == .audio && !isEmbedded($0) } }
-    /// Included audio, in output order
+    /// Included audio, in output order (the order of `tracks`, the one source of truth)
     var outputAudio: [Track] { tracks.filter { $0.kind == .audio && $0.include } }
     var subtitleTracks: [Track] { tracks.filter { $0.kind == .subtitle } }
     /// Embedded audio nobody has answered "Use it in the delivery?" for
     var pendingAudioDecisions: [Track] { embeddedAudio.filter { embeddedAudioAnswer[key(of: $0)] == nil } }
-    /// Dolby Vision / HDR10+ loaded but the picture isn't going to HEVC HDR: the metadata would be left out
+    /// Dolby Vision / HDR10+ loaded but the picture isn't going to HEVC HDR: the metadata would be left out of the file
     var metadataNotEmbedded: String? {
-        guard hdr.dvSource != nil || hdr.hdr10plusJSON != nil, video.choice(self) != .hevcHDR else { return nil }
-        let what = [hdr.dvSource != nil ? "Dolby Vision" : nil, hdr.hdr10plusJSON != nil ? "HDR10+" : nil].compactMap { $0 }.joined(separator: " and ")
-        return "The \(what) metadata won't be in the file: the picture isn't transcoded to HEVC. Transcode the picture, or remove the metadata."
+        let dv = hdr.dvSource != nil && hdr.dolbyVision
+        let plus = hdr.hdr10plusJSON != nil && hdr.hdr10plus
+        guard dv || plus else { return nil }
+        let choice = video.choice(self)
+        guard choice != .hevcHDR else { return nil }
+        var what: [String] = []
+        if dv, let s = hdr.dvSource { what.append("Dolby Vision metadata (\(metadataName(s)))") }
+        if plus, let u = hdr.hdr10plusJSON { what.append("HDR10+ metadata (\(u.lastPathComponent))") }
+        let it = what.count > 1 ? "them" : "it"
+        let loaded = what.joined(separator: " and ") + (what.count > 1 ? " are loaded" : " is loaded")
+        if case .transcode(let t) = choice {
+            return "\(loaded) but the picture would become \(Self.presetName(t.preset)), which can't carry \(it). Transcode to HEVC 10-bit HDR to embed \(it), or remove the metadata."
+        }
+        return "\(loaded) but the picture would be copied — it can't carry \(it). Transcode to HEVC to embed \(it), or remove the metadata."
     }
-    /// The sidebar's amber badge
+    private func metadataName(_ s: DolbyVisionMeta.Source) -> String {
+        switch s {
+        case .xml(let u): return u.lastPathComponent
+        case .isxd(let parts): return hdr.imf.map { "IMF package “\($0.title)”" } ?? parts.first?.file.lastPathComponent ?? "IMF package"
+        }
+    }
+    private static func presetName(_ raw: String) -> String {
+        switch TranscodePreset(rawValue: raw) {
+        case .prores422HQ?: return "ProRes 422 HQ"
+        case .prores422?: return "ProRes 422"
+        case .h264Review?: return "H.264"
+        case .hevcSDR?: return "HEVC SDR"
+        default: return TranscodePreset(rawValue: raw)?.label ?? raw
+        }
+    }
+    /// The sidebar's amber badge: decisions still open on that tab
     func pendingCount(for tab: AppMode) -> Int {
         switch tab {
-        case .video: return video.decisionPending ? 1 : 0
-        case .audio: return pendingAudioDecisions.count
-        default: return 0
+        case .video:
+            return (video.decisionPending ? 1 : 0) + (metadataNotEmbedded != nil ? 1 : 0) + video.checks.filter { $0.level == .fail }.count
+        case .audio:
+            return pendingAudioDecisions.count + outputAudio.filter { $0.delivery == .copy && audioConversionReason($0) != nil }.count
+        case .subtitles, .delivery, .inspect, .qc, .atmos:
+            return 0
         }
     }
     /// 0-based among outputAudio
@@ -2894,15 +2923,239 @@ final class Project {
         return Binding(get: { self.tracks.first(where: { $0.id == id }) ?? last },
                        set: { v in if let j = self.tracks.firstIndex(where: { $0.id == id }) { self.tracks[j] = v } })
     }
-    /// THE routing rule (drops, Finder opens, Add Files). Wave 0: everything still goes through add(), as before.
-    func route(_ urls: [URL]) { add(urls) }
-    /// Replaces the picture with the files in pictureReplaceRequest (wave 0: the old picture's file and alignment go)
+
+    // MARK: routing (every drop, Finder open and Add Files)
+
+    /// THE routing rule. Each file goes to the tab it belongs to: a picture (or an IMF package), a Dolby Vision XML or an
+    /// HDR10+ JSON to Video (the sound inside the picture shows on Audio as "FROM THE VIDEO FILE"), audio to Audio,
+    /// subtitles to Subtitles, a .bmjob to Delivery. A file that lands on another tab than the current one says so on the
+    /// current tab. A second picture asks "Replace the picture?" (pictureReplaceRequest); several pictures at once ask
+    /// "One delivery per file?" (batchRequest). The checking tools keep their one-file open.
+    func route(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        switch mode {
+        case .inspect: if let u = urls.first { inspector.load(u) }; return
+        case .atmos: if let u = urls.first { atmos.load(u) }; return
+        case .qc: if let u = urls.first { RenderQCModel.shared.open(u) }; return
+        case .video, .audio, .subtitles, .delivery: break
+        }
+        let tab = mode
+        notices.removeAll { $0.tab == tab }              // a new drop clears only the notices of the tab it was dropped on
+        routeFiles(urls, from: tab)
+    }
+
+    /// What one file is: decided off the main thread (a 127 MB Dolby Vision XML, an HDR10+ JSON, a movie take seconds)
+    fileprivate enum Routed {
+        case imf(URL, IMFLoad)
+        case dolbyVision(URL)
+        case hdr10Plus(URL, frames: Int)
+        case job(URL)
+        case media(URL, tracks: [Track], error: String?)
+    }
+    /// One drop while it is placed (main thread only)
+    fileprivate final class RouteBatch {
+        let tab: AppMode                            // the tab the files were dropped on
+        let target: VideoPlanModel.Choice?          // File Checker hand-off: the picture's destination, applied once it is in
+        var moved: [AppMode: [String]] = [:]        // files that went to another tab
+        var userAudio: Set<UUID> = []               // audio from the user's own files, added now
+        var inserted = false                        // tracks went in (a drop of job files only changes nothing here)
+        init(tab: AppMode, target: VideoPlanModel.Choice?) { self.tab = tab; self.target = target }
+    }
+
+    fileprivate func routeFiles(_ urls: [URL], from tab: AppMode, target: VideoPlanModel.Choice? = nil) {
+        guard !busy else {
+            post("Still reading files or lining up the audio — add these files again in a moment.", tab: tab, level: .warn)
+            return
+        }
+        if case .done = state { state = .idle }
+        loadingCount += 1
+        let batch = RouteBatch(tab: tab, target: target)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var later: [Routed] = []
+            for u in Self.expandFolders(urls) {
+                let r = Self.classify(u)
+                if case .media(_, let ts, _) = r, !ts.contains(where: { $0.kind == .video }) {
+                    DispatchQueue.main.async { self.place(r, batch) }     // audio and subtitles show up as soon as they are read
+                } else { later.append(r) }
+            }
+            DispatchQueue.main.async { self.finishRoute(later, batch) }
+        }
+    }
+
+    /// Folders open into their files (in name order), except an IMF package, which is one picture
+    fileprivate static func expandFolders(_ urls: [URL]) -> [URL] {
+        let fm = FileManager.default
+        var out: [URL] = []
+        for u in urls {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue, IMF.packageFolder(for: u) == nil {
+                let items = (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil)) ?? []
+                out += items.filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            } else { out.append(u) }
+        }
+        return out
+    }
+
+    fileprivate static func classify(_ u: URL) -> Routed {
+        let ext = u.pathExtension.lowercased()
+        if ext == "bmjob" { return .job(u) }
+        if ext == "xml", (xmlRootName(u) ?? IMF.rootName(u)) == "DolbyLabsMDF" { return .dolbyVision(u) }
+        if IMF.packageFolder(for: u) != nil { return .imf(u, readIMF(u)) }
+        if ext == "json", let n = HDR10Plus.frames(u) { return .hdr10Plus(u, frames: n) }
+        let r = Probe.tracks(for: u)
+        return .media(u, tracks: r.tracks, error: r.error)
+    }
+
+    /// The root element of an XML from the first 64 KB (so a feature-length Dolby Vision XML isn't parsed whole just to
+    /// know what it is); nil when the head doesn't say, and the caller reads the file the old way
+    fileprivate static func xmlRootName(_ u: URL) -> String? {
+        guard let h = try? FileHandle(forReadingFrom: u) else { return nil }
+        defer { try? h.close() }
+        guard let d = try? h.read(upToCount: 65_536), !d.isEmpty else { return nil }
+        let s = String(decoding: d, as: UTF8.self)
+        var i = s.startIndex
+        while let lt = s[i...].firstIndex(of: "<") {
+            let rest = s[lt...]
+            if rest.hasPrefix("<?") { guard let e = rest.range(of: "?>") else { return nil }; i = e.upperBound; continue }
+            if rest.hasPrefix("<!--") { guard let e = rest.range(of: "-->") else { return nil }; i = e.upperBound; continue }
+            if rest.hasPrefix("<!") { guard let e = rest.firstIndex(of: ">") else { return nil }; i = s.index(after: e); continue }
+            let name = rest.dropFirst().prefix { !" \t\r\n/>".contains($0) }
+            guard !name.isEmpty else { return nil }
+            return name.split(separator: ":").last.map(String.init)
+        }
+        return nil
+    }
+
+    /// Audio and subtitles (a file with no picture), placed as soon as it is read
+    fileprivate func place(_ r: Routed, _ batch: RouteBatch) {
+        guard case .media(let u, var ts, let error) = r else { return }
+        if let error { post(error, tab: batch.tab, level: .warn); return }
+        let dest: AppMode
+        if ts.contains(where: { $0.kind == .audio }) { dest = .audio }
+        else if ts.contains(where: { $0.kind == .subtitle }) { dest = .subtitles }
+        else { post("“\(u.lastPathComponent)” has no picture, audio or subtitles that can be used.", tab: batch.tab, level: .warn); return }
+        for i in ts.indices where ts[i].kind == .subtitle { ts[i].include = false }     // subtitles start out of the file
+        insert(ts)
+        batch.inserted = true
+        batch.userAudio.formUnion(ts.filter { $0.kind == .audio }.map(\.id))
+        if dest != batch.tab { batch.moved[dest, default: []].append(u.lastPathComponent) }
+    }
+
+    /// The rest of a drop, once every file has been read: jobs, HDR metadata, the picture, then the defaults
+    fileprivate func finishRoute(_ found: [Routed], _ batch: RouteBatch) {
+        var pictures: [(url: URL, routed: Routed)] = []
+        var metadata: [(kind: VideoPlanModel.MetadataKind, url: URL)] = []
+        for r in found {
+            switch r {
+            case .job(let u):
+                DeliveryQueue.shared.load(u, into: self)
+                if batch.tab != .delivery { batch.moved[.delivery, default: []].append(u.lastPathComponent) }
+            case .dolbyVision(let u):
+                // the window doesn't switch the encode on: the Video tab asks (the command line's buildProject still does)
+                hdr.dvSource = .xml(u); hdr.dolbyVision = true
+                metadata.append((.dolbyVision, u))
+                if batch.tab != .video { batch.moved[.video, default: []].append(u.lastPathComponent) }
+            case .hdr10Plus(let u, let n):
+                hdr.hdr10plusJSON = u; hdr.hdr10plus = true; hdr.hdr10plusFrames = n
+                metadata.append((.hdr10Plus, u))
+                if batch.tab != .video { batch.moved[.video, default: []].append(u.lastPathComponent) }
+            case .imf(let u, _), .media(let u, _, _):
+                pictures.append((u, r))
+            }
+        }
+
+        // the picture: one goes in; one more asks to replace the loaded one; several ask for one delivery per file
+        var placed = false
+        if pictures.count > 1 {
+            batchRequest = pictures.map(\.url)
+            if batch.tab != .video { post("\(pictures.count) pictures go on the Video tab — it asks there whether to make one delivery per file.", tab: batch.tab) }
+        } else if let p = pictures.first {
+            if let v = videoSource, Tools.sameFile(v.url, p.url) {
+                post("“\(p.url.lastPathComponent)” is already the picture.", tab: batch.tab)
+            } else if videoSource != nil {
+                pendingVideoTarget = nil                  // a new question replaces an older File Checker hand-off
+                pictureReplaceRequest = [p.url]
+                if batch.tab != .video { post("“\(p.url.lastPathComponent)” goes on the Video tab — it asks there whether to replace the picture.", tab: batch.tab) }
+            } else {
+                switch p.routed {
+                case .imf(_, let load):
+                    applyIMF(load, gui: true)
+                    placed = videoSource != nil
+                case .media(_, var ts, _):
+                    for i in ts.indices where ts[i].kind == .subtitle { ts[i].include = false }   // subtitles start out of the file
+                    insert(ts)
+                    placed = true
+                default: break
+                }
+                if placed { batch.inserted = true }
+                if placed && batch.tab != .video { batch.moved[.video, default: []].insert(p.url.lastPathComponent, at: 0) }
+            }
+        }
+        // a Dolby Vision XML not checked yet (insert() checks it when a picture other than an IMF goes in)
+        if metadata.contains(where: { $0.kind == .dolbyVision }), case .xml? = hdr.dvSource, !(placed && hdr.imf == nil) {
+            hdr.checkDolbyVision(width: videoWidth, height: videoHeight, frames: videoFrames)
+        }
+
+        loadingCount -= 1
+        if batch.inserted {
+            autoGroup()
+            if loadingCount == 0 { applyEmbeddedAudioDefaults() }
+            chooseDefaultReference()
+        }
+        if placed {
+            video.didAddVideo(project: self)
+            if let t = batch.target { video.choose(t, project: self) }
+            if hdr.imf != nil, case .isxd? = hdr.dvSource, let cpl = hdr.imf?.cpl { video.didAddMetadata(kind: .dolbyVision, url: cpl, project: self) }
+        }
+        for m in metadata { video.didAddMetadata(kind: m.kind, url: m.url, project: self) }
+
+        for dest in AppMode.workflow where dest != batch.tab {
+            guard let names = batch.moved[dest], !names.isEmpty else { continue }
+            let list = names.count == 1 ? "“\(names[0])” goes" : names.count == 2 ? "“\(names[0])” and “\(names[1])” go"
+                : "“\(names[0])”, “\(names[1])” and \(names.count - 2) more go"
+            post("\(list) on the \(dest.label) tab — \(dest == .delivery ? "opened" : "added") there.", tab: batch.tab)
+        }
+
+        // a mix dropped while a reference is there lines itself up (only the tracks just added: a trim typed by hand stays)
+        if !batch.userAudio.isEmpty, pictureReplaceRequest == nil, let ref = reference {
+            let new = Set(tracks.filter { t in
+                t.kind == .audio && t.include && t.id != ref.id && !isEmbedded(t) &&
+                    (batch.userAudio.contains(t.id) || t.members.contains { batch.userAudio.contains($0.id) })
+            }.map(\.id))
+            if !new.isEmpty { autoAlign(only: new) }
+        }
+    }
+
+    /// The window's default for the sound inside the picture: out of the file and not answered (the Audio tab asks), and
+    /// the sync reference is its first stereo or mono (else its first track). The command line never comes here.
+    fileprivate func applyEmbeddedAudioDefaults() {
+        let emb = embeddedAudio
+        for t in emb where embeddedAudioAnswer[key(of: t)] == nil {
+            if let i = tracks.firstIndex(where: { $0.id == t.id }) { tracks[i].include = false }
+        }
+        if reference == nil, let r = emb.first(where: { $0.channels <= 2 }) ?? emb.first { syncReferenceID = r.id }
+    }
+
+    /// Replaces the picture with the files in pictureReplaceRequest: the old picture goes with its own audio, timecode and
+    /// subtitles, the answers about them, the alignment (it was measured against the old file) and an IMF's forced encode
     func confirmReplacePicture() {
         guard let urls = pictureReplaceRequest else { return }
+        guard !busy else { post("Still reading files or lining up the audio — replace the picture in a moment.", tab: .video, level: .warn); return }
         pictureReplaceRequest = nil
+        let target = pendingVideoTarget
+        pendingVideoTarget = nil
+        clearPicture()
+        routeFiles(urls, from: .video, target: target)
+        post("New picture: alignment cleared — line up again", tab: .video, level: .warn)
+        if !userAudio.isEmpty { post("New picture: alignment cleared — line up again", tab: .audio, level: .warn) }
+    }
+    func cancelReplacePicture() { pictureReplaceRequest = nil; pendingVideoTarget = nil }
+
+    /// The picture leaves: with it its own audio, timecode and subtitles, the answers, the alignment and an IMF's encode
+    private func clearPicture() {
         if let old = videoSource {
-            let gone = Set(tracks.filter { $0.url == old.url }.map(\.id))     // the picture, its own audio, its timecode
-            tracks.removeAll { gone.contains($0.id) }
+            let path = old.url.path
+            tracks.removeAll { $0.url.path == path || $0.members.contains { $0.url.path == path } }
         }
         embeddedAudioAnswer = [:]
         syncReferenceID = nil
@@ -2911,35 +3164,109 @@ final class Project {
         }
         restore(referenceLateFrames: 0)
         alignLines = []
-        post("New picture: alignment cleared — line up again", tab: .video, level: .warn)
-        let target = pendingVideoTarget
-        pendingVideoTarget = nil
-        route(urls)
-        if let target { video.choose(target, project: self) }
+        if hdr.imf != nil {
+            // an IMF forced the HEVC encode and brought its own Dolby Vision track: both belonged to the old picture
+            hdr.imf = nil
+            if case .isxd? = hdr.dvSource { hdr.dvSource = nil; hdr.dvSummary = nil; hdr.dvProblem = nil; hdr.dvXMLReady = nil; hdr.dvChecking = false }
+            if video.choice(self) == .hevcHDR { video.choose(.copy, project: self) }
+        }
     }
-    func cancelReplacePicture() { pictureReplaceRequest = nil; pendingVideoTarget = nil }
-    /// The answer to "Use the audio that came inside the video?" (wave 0: stored, include follows, reference if none)
+
+    /// The answer to "This audio came inside the video. Use it in the delivery?"
+    /// No: out of the file; it becomes the sync reference if there is none, or if the current one has more channels.
+    /// Yes: in the file; the reference if there is none — and the reference, when it goes in, is cut by its own lateness
+    /// vs the picture so it comes out exact.
     func setEmbeddedAudio(_ id: UUID, use: Bool) {
-        guard let i = tracks.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = tracks.firstIndex(where: { $0.id == id }), tracks[i].kind == .audio else { return }
         embeddedAudioAnswer[key(of: tracks[i])] = use
         tracks[i].include = use
-        if syncReferenceID == nil { syncReferenceID = id }
+        if use {
+            if reference == nil { syncReferenceID = id }
+            if syncReferenceID == id { followPicture(i) }
+        } else {
+            if let r = reference, r.id != id {
+                if r.channels > tracks[i].channels { syncReferenceID = id }
+            } else { syncReferenceID = id }
+            if syncReferenceID == id, tracks[i].syncApplied, tracks[i].syncLag == nil {
+                tracks[i].trimStart = 0; tracks[i].syncApplied = false      // the cut it had as a muxed reference no longer applies
+            }
+        }
     }
-    /// nil = not in the file (include = false); a taken slot swaps the two tracks
+
+    /// The reference goes into the file: its head is cut by how late it is vs the picture (sample exact), so it comes out
+    /// exact, and later changes of that lateness move it too (syncApplied)
+    private func followPicture(_ i: Int) {
+        let t = tracks[i]
+        if t.canTrim, t.sampleRate > 0 {
+            tracks[i].trimStart = Int((referenceOffset * t.sampleRate).rounded())
+            tracks[i].syncApplied = true
+        } else if referenceLateFrames != 0 {
+            let ms = referenceOffset * 1000
+            post(String(format: "“%@”: the reference you are muxing is %.1f ms %@ vs the picture, and %@ can't be cut where it is — it goes in that %@.",
+                        t.title, abs(ms), ms >= 0 ? "late" : "early", t.codecName, ms >= 0 ? "late" : "early"), tab: .audio, level: .warn)
+        }
+    }
+
+    /// Output slot: nil = not in the file; a slot another track holds swaps the two (output order = the order of the
+    /// included audio in `tracks`). For the sound inside the picture, choosing a slot or "not in the file" is the answer.
     func moveAudio(_ id: UUID, toSlot k: Int?) {
-        guard let i = tracks.firstIndex(where: { $0.id == id }), tracks[i].kind == .audio else { return }
-        guard let k else { tracks[i].include = false; return }
-        let others = outputAudio.filter { $0.id != id }
-        tracks[i].include = true
-        if k < others.count, let j = tracks.firstIndex(where: { $0.id == others[k].id }) { tracks.swapAt(i, j) }
+        guard let i0 = tracks.firstIndex(where: { $0.id == id }), tracks[i0].kind == .audio else { return }
+        let t = tracks[i0]
+        guard let k else {
+            if isEmbedded(t) { setEmbeddedAudio(id, use: false) } else { tracks[i0].include = false }
+            return
+        }
+        let slots = outputAudio                          // as it is now: slot n is slots[n]
+        let wasIn = t.include
+        if isEmbedded(t) && embeddedAudioAnswer[key(of: t)] != true { setEmbeddedAudio(id, use: true) } else { tracks[i0].include = true }
+        guard let i = tracks.firstIndex(where: { $0.id == id }) else { return }
+        if k >= 0 && k < slots.count {
+            guard slots[k].id != id, let j = tracks.firstIndex(where: { $0.id == slots[k].id }) else { return }
+            tracks.swapAt(i, j)
+            if !wasIn {
+                // it came from "not in the file": the track that held the slot takes its place there
+                let d = tracks[i]
+                if isEmbedded(d) { setEmbeddedAudio(d.id, use: false) } else { tracks[i].include = false }
+            }
+        } else if let last = slots.last(where: { $0.id != id }), let j = tracks.firstIndex(where: { $0.id == last.id }), i < j {
+            tracks.insert(tracks.remove(at: i), at: j)       // the last slot: right after the last track in the file
+        }
     }
-    /// Why the track can't go in as it is (wave 0: never)
-    func audioConversionReason(_ t: Track) -> String? { nil }
+
+    /// Why the track can't go into the chosen container as it is (nil when it fits). The same rules JobRunner.validate and
+    /// containerWarnings apply, said for one track.
+    func audioConversionReason(_ t: Track) -> String? {
+        guard t.kind == .audio else { return nil }
+        let c = container.rawValue.uppercased()
+        if t.url.pathExtension.lowercased() == "mxf" { return "Audio inside an MXF master can't go into \(c) as it is" }
+        if t.isPCM && t.channels > 16 { return "A Dolby Atmos ADM master (\(t.channels) channels): no player plays it — it can only line up the others" }
+        if let p = plan(for: t), !p.isIdentity {
+            if !t.canTrim {
+                return t.codecKey == "truehd"
+                    ? "Lining it up needs a head trim, and a TrueHD encode can't be cut — it has to start exactly with the picture"
+                    : "Lining it up needs a head trim, and \(t.codecName) can't be cut as it is"
+            }
+            if p.pad > 0 && !t.isPCM && t.codecKey != "eac3" { return "It's early and needs silence at the head, which \(t.codecName) can't get as it is" }
+        }
+        let trueHD = t.codecKey == "truehd" || t.codecKey == "mlp"
+        switch container {
+        case .mp4:
+            if t.isPCM { return "PCM can't go in MP4 (most players won't play it)" }
+            if trueHD { return "TrueHD can't go in MP4 (few players play it — MKV is the home-theater standard)" }
+            if t.codecKey == "dts" { return "DTS can't go in MP4 reliably" }
+        case .mov:
+            if trueHD { return "TrueHD can't go in MOV (very few players, never Apple devices — use MKV)" }
+            if t.codecKey == "dts" { return "DTS can't go in MOV reliably" }
+        case .mkv:
+            break
+        }
+        return nil
+    }
+
     /// File Checker hand-off: the file opens on the Video tab with that destination (asks first if a picture is loaded)
     func openInVideoTab(_ url: URL, target: VideoPlanModel.Choice) {
         if videoSource != nil { pendingVideoTarget = target; pictureReplaceRequest = [url]; return }
-        route([url])
-        video.choose(target, project: self)
+        routeFiles([url], from: .video, target: target)
     }
     /// Sets referenceLateFrames without moving the aligned tracks (job rebuild, replace picture)
     func restore(referenceLateFrames f: Double) {
@@ -2950,56 +3277,8 @@ final class Project {
 
     // MARK: files
 
-    func add(_ urls: [URL]) {
-        if mode == .inspect, let u = urls.first { inspector.load(u); return }
-        if mode == .atmos, let u = urls.first { atmos.load(u); return }
-        if mode == .qc, let u = urls.first { RenderQCModel.shared.open(u); return }
-        guard !busy else { return }
-        // IMF packages (a folder with an ASSETMAP, or its CPL) are read as one picture
-        let imfs = urls.filter { IMF.packageFolder(for: $0) != nil }
-        if let u = imfs.first { loadIMF(u) }
-        // HDR metadata dropped with the files: a Dolby Vision XML, an HDR10+ JSON
-        var metadata: [URL] = []
-        for u in urls where !imfs.contains(u) {
-            let ext = u.pathExtension.lowercased()
-            if ext == "xml", IMF.rootName(u) == "DolbyLabsMDF" {
-                hdr.dvSource = .xml(u); hdr.dolbyVision = true; hdr.encode = true; metadata.append(u)
-                hdr.autoEnabledBy = u; hdr.autoReason = "Dolby Vision metadata was added. To embed it, the picture has to become HEVC 10-bit, so BROS-MUX turned the re-encoding on by itself." 
-                hdr.checkDolbyVision(width: videoWidth, height: videoHeight, frames: videoFrames)
-            } else if ext == "json", let n = HDR10Plus.frames(u) {
-                hdr.hdr10plusJSON = u; hdr.hdr10plus = true; hdr.hdr10plusFrames = n; hdr.encode = true; metadata.append(u)
-                hdr.autoEnabledBy = u; hdr.autoReason = "HDR10+ metadata was added. To embed it, the picture has to become HEVC 10-bit, so BROS-MUX turned the re-encoding on by itself." 
-            }
-        }
-        var files: [URL] = []
-        for u in urls where !imfs.contains(u) && !metadata.contains(u) {
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue {
-                let items = (try? FileManager.default.contentsOfDirectory(at: u, includingPropertiesForKeys: nil)) ?? []
-                files += items.filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            } else { files.append(u) }
-        }
-        guard !files.isEmpty else { return }
-        loadingCount += 1
-        notices.removeAll()
-        if case .done = state { state = .idle }
-        // read in the order the files were given (predictable result); each file shows up in the list as soon as it
-        // has been read, so a long batch is not one long wait in front of an empty list
-        DispatchQueue.global(qos: .userInitiated).async {
-            for f in files {
-                let r = Probe.tracks(for: f)
-                DispatchQueue.main.async {
-                    if let e = r.error { self.post(e, tab: .audio, level: .warn) }
-                    self.insert(r.tracks)
-                }
-            }
-            DispatchQueue.main.async {
-                self.loadingCount -= 1
-                self.autoGroup()
-                self.chooseDefaultReference()
-            }
-        }
-    }
+    /// The old name of the routing rule
+    func add(_ urls: [URL]) { route(urls) }
 
     func insert(_ new: [Track]) {
         guard !new.isEmpty else { return }
@@ -3034,9 +3313,17 @@ final class Project {
 
     /// If the video has its own audio (a guide stereo or mono) and there are standalone audio files, the video's audio
     /// becomes the sync reference (and leaves the output). A 5.1 inside the video is a deliverable, not a guide: it stays.
+    /// That is the command line's rule, kept exactly while no answer is stored. Once the window has an answer about the
+    /// picture's own sound, the reference is its first stereo or mono (else its first track) and the answer decides
+    /// whether it goes in the file.
     func chooseDefaultReference() {
-        guard reference == nil,
-              let ref = tracks.first(where: { $0.kind == .audio && $0.fromVideoFile && $0.channels <= 2 }),
+        guard reference == nil else { return }
+        if !embeddedAudioAnswer.isEmpty {
+            let emb = embeddedAudio
+            if let ref = emb.first(where: { $0.channels <= 2 }) ?? emb.first { syncReferenceID = ref.id }
+            return
+        }
+        guard let ref = tracks.first(where: { $0.kind == .audio && $0.fromVideoFile && $0.channels <= 2 }),
               tracks.contains(where: { $0.kind == .audio && !$0.fromVideoFile }) else { return }
         syncReferenceID = ref.id
         if let i = tracks.firstIndex(where: { $0.id == ref.id }), tracks[i].include {
@@ -3069,9 +3356,23 @@ final class Project {
         let members = ids.compactMap { id in tracks.first { $0.id == id } }
         guard members.count >= 2, var g = Track.group(members) else { return }
         let pos = tracks.firstIndex { $0.id == members[0].id } ?? tracks.count
-        if let r = syncReferenceID, ids.contains(r) {
-            // the reference was one of the monos: a guide stereo stays the reference; a 5.1 is a deliverable and comes back in
-            if g.channels <= 2 { syncReferenceID = g.id; g.include = false } else { syncReferenceID = nil }
+        if embeddedAudioAnswer.isEmpty {
+            if let r = syncReferenceID, ids.contains(r) {
+                // the reference was one of the monos: a guide stereo stays the reference; a 5.1 is a deliverable and comes back in
+                if g.channels <= 2 { syncReferenceID = g.id; g.include = false } else { syncReferenceID = nil }
+            }
+        } else {
+            // the window, once an answer exists: the members' answer (when they all agree) and the reference move to the group
+            let keys = members.map { key(of: $0) }
+            let answers = keys.compactMap { embeddedAudioAnswer[$0] }
+            keys.forEach { embeddedAudioAnswer[$0] = nil }
+            let answer: Bool? = answers.count == keys.count && Set(answers).count == 1 ? answers[0] : nil
+            if let answer { embeddedAudioAnswer[key(of: g)] = answer }
+            if isEmbedded(g) { g.include = answer ?? false }            // no answer: out of the file until the Audio tab asks
+            if let r = syncReferenceID, ids.contains(r) {
+                syncReferenceID = g.id
+                if !isEmbedded(g) && g.channels <= 2 { g.include = false }
+            }
         }
         tracks.removeAll { t in ids.contains(t.id) }
         tracks.insert(g, at: min(pos, tracks.count))
@@ -3089,7 +3390,9 @@ final class Project {
         var members = g.members
         for k in members.indices { members[k].include = g.include; members[k].language = g.language }
         tracks.insert(contentsOf: members, at: i)
-        if syncReferenceID == id { syncReferenceID = nil }
+        // the group's answer and its place as the sync reference stay with its members
+        if let a = embeddedAudioAnswer.removeValue(forKey: key(of: g)) { for m in members { embeddedAudioAnswer[key(of: m)] = a } }
+        if syncReferenceID == id { syncReferenceID = members.first?.id }
     }
     /// Listens to a group in the background (ChannelID over the members) and fills in the roles if nobody set them meanwhile
     func listen(to id: UUID) {
@@ -3130,6 +3433,12 @@ final class Project {
     }
 
     func remove(_ id: UUID) {
+        if let v = videoSource, v.id == id {
+            // the picture goes with its own audio, timecode and subtitles, and the alignment measured against it
+            clearPicture()
+            post("Picture removed: alignment cleared — line up again with the next picture", tab: .video, level: .warn)
+            return
+        }
         tracks.removeAll { $0.id == id }
         if syncReferenceID == id { syncReferenceID = nil }
     }
@@ -3144,13 +3453,37 @@ final class Project {
         video.reset()
     }
 
+    /// Add Files (⌘O), per tab. Whatever is chosen goes through the routing rule, so a file picked on the wrong tab still
+    /// lands where it belongs (and says so).
     func openPanel() {
         let p = NSOpenPanel()
-        p.allowsMultipleSelection = mode.isWorkflow
-        p.canChooseDirectories = mode.isWorkflow
         p.canChooseFiles = true
-        p.message = mode.isWorkflow ? "Choose the video, audio and subtitle files (or an IMF package folder)" : mode == .inspect ? "Choose the file to inspect" : mode == .qc ? "Choose the rendered file to check" : "Choose a Dolby Atmos (E-AC-3 JOC) file"
-        p.prompt = mode.isWorkflow ? "Add" : mode == .inspect ? "Inspect" : mode == .qc ? "Check" : "Visualize"
+        p.allowsMultipleSelection = [.video, .audio, .subtitles].contains(mode)
+        p.canChooseDirectories = mode == .video || mode == .audio          // an IMF package folder; a folder of mono WAVs
+        switch mode {
+        case .video:
+            p.message = "Choose the picture — a movie file or an IMF package folder — and its Dolby Vision XML or HDR10+ JSON, if it has one"
+            p.prompt = "Add"
+        case .audio:
+            p.message = "Choose your audio: the mix files (WAV, E-AC-3 / Atmos, TrueHD…), or a folder of mono WAVs"
+            p.prompt = "Add"
+        case .subtitles:
+            p.message = "Choose the subtitle files (SRT, WebVTT, TTML…)"
+            p.prompt = "Add"
+        case .delivery:
+            p.message = "Choose a saved delivery job (.bmjob)"
+            p.prompt = "Open"
+            if let t = UTType(filenameExtension: "bmjob") { p.allowedContentTypes = [t] }
+        case .inspect:
+            p.message = "Choose the file to inspect"
+            p.prompt = "Inspect"
+        case .qc:
+            p.message = "Choose the rendered file to check"
+            p.prompt = "Check"
+        case .atmos:
+            p.message = "Choose a Dolby Atmos (E-AC-3 JOC) file"
+            p.prompt = "Visualize"
+        }
         if p.runModal() == .OK { route(p.urls) }
     }
 
@@ -3264,12 +3597,20 @@ final class Project {
         return parts.joined(separator: " · ")
     }
 
-    func autoAlign() {
+    func autoAlign() { autoAlign(only: nil) }
+
+    /// `only`: line up just these tracks (a mix dropped while a reference is there) and keep the other lines
+    private func autoAlign(only: Set<UUID>?) {
         guard let ref = reference, !aligning, state != .running else { return }
-        let targets = tracks.filter { $0.kind == .audio && $0.include && $0.id != ref.id }
-        guard !targets.isEmpty else { alignLines = ["Check at least one audio track (besides the reference) to align."]; return }
-        if let i = tracks.firstIndex(where: { $0.id == ref.id }), tracks[i].include { tracks[i].include = false }
-        aligning = true; alignLines = []; alignProgress = 0
+        let targets = tracks.filter { $0.kind == .audio && $0.include && $0.id != ref.id && (only?.contains($0.id) ?? true) }
+        guard !targets.isEmpty else {
+            if only == nil { alignLines = ["Put at least one audio track (besides the reference) in the file to line it up."] }
+            return
+        }
+        // the reference leaves the file while it lines the others up — unless the answer was "Use it"
+        if let i = tracks.firstIndex(where: { $0.id == ref.id }), tracks[i].include, embeddedAudioAnswer[key(of: tracks[i])] != true { tracks[i].include = false }
+        aligning = true; alignProgress = 0
+        if only == nil { alignLines = [] } else { alignLines.removeAll { line in targets.contains { line.hasPrefix("“\($0.title)”") } } }
         let flag = CancelFlag(); alignCancel = flag
         DispatchQueue.global(qos: .userInitiated).async {
             let results = Project.align(reference: ref, targets: targets, cancel: flag, offset: self.referenceOffset, fps: self.videoFPS.value, duration: self.videoDuration) { s, p in
@@ -3562,6 +3903,7 @@ struct BrosMuxApp: App {
             ContentView()
                 .environment(project)
                 .frame(minWidth: 1180, minHeight: 720)
+                .preferredColorScheme(.dark)                    // Cryo is dark only
                 .onAppear { delegate.project = project }
                 .sheet(isPresented: $showWelcome) {
                     WelcomeView(onStart: { showWelcome = false }).environment(project)
@@ -3572,25 +3914,67 @@ struct BrosMuxApp: App {
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Add Files…") { project.openPanel() }.keyboardShortcut("o").disabled(project.mode.isWorkflow && project.busy)
+                Button(addTitle) { project.openPanel() }.keyboardShortcut("o").disabled(project.mode.isWorkflow && project.busy)
                 Button("Clear All") { project.clear() }.keyboardShortcut("n").disabled(project.busy)
             }
+            // ⌘1…⌘4 the four steps, ⌘5…⌘7 the checking tools (⌘↩ belongs to START DELIVERY only)
+            CommandMenu("Go") {
+                ForEach(Array(AppMode.workflow.enumerated()), id: \.element) { n, m in
+                    Button(String(format: "%02d  ", m.step ?? n + 1) + m.label) { project.mode = m }
+                        .keyboardShortcut(KeyEquivalent(Character("\(n + 1)")), modifiers: .command)
+                }
+                Divider()
+                ForEach(Array(AppMode.tools.enumerated()), id: \.element) { n, m in
+                    Button(m.label) { project.mode = m }
+                        .keyboardShortcut(KeyEquivalent(Character("\(AppMode.workflow.count + n + 1)")), modifiers: .command)
+                }
+            }
+        }
+    }
+
+    private var addTitle: String {
+        switch project.mode {
+        case .video, .audio, .subtitles: return "Add Files…"
+        case .delivery: return "Open Job…"
+        case .inspect, .qc, .atmos: return "Open File…"
         }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var project: Project?
+    /// Set when the window appears; files the Finder opened before that wait for it
+    var project: Project? { didSet { flushOpens() } }
+    private var pendingOpens: [URL] = []
+    private var launched = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.appearance = NSAppearance(named: .darkAqua)       // Cryo is dark only
+    }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !launched else { return }
+        launched = true
+        DeliveryQueue.shared.restoreAtLaunch()                  // the saved queue (Jobs/queue.json) comes back
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-    func application(_ application: NSApplication, open urls: [URL]) { project?.route(urls) }
+    func application(_ application: NSApplication, open urls: [URL]) {
+        pendingOpens += urls
+        flushOpens()
+    }
+    private func flushOpens() {
+        guard let p = project, !pendingOpens.isEmpty else { return }
+        let urls = pendingOpens
+        pendingOpens = []
+        p.route(urls)
+    }
+    /// Only lining up the audio is lost on quit: a Delivery renders in its own process and goes on without the app
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let p = project, p.state == .running || p.aligning else { return .terminateNow }
+        guard let p = project, p.aligning else { return .terminateNow }
         let a = NSAlert()
-        a.messageText = "A job is still running"
-        a.informativeText = "If you quit now it will be cancelled and nothing will be written to the destination."
+        a.messageText = "The audio is still being lined up"
+        a.informativeText = "If you quit now the alignment stops and nothing is changed. A delivery that is rendering is not affected — it goes on by itself."
         a.addButton(withTitle: "Keep Working")
-        a.addButton(withTitle: "Cancel Job and Quit")
-        if a.runModal() == .alertSecondButtonReturn { p.cancel(); p.cancelAlign(); return .terminateNow }
+        a.addButton(withTitle: "Stop and Quit")
+        if a.runModal() == .alertSecondButtonReturn { p.cancelAlign(); return .terminateNow }
         return .terminateCancel
     }
 }
@@ -3871,18 +4255,36 @@ func runReportCLI(_ args: [String]) -> Int32 {
     return 0
 }
 
-/// Renders the window to a PNG (for visual checks and documentation)
+/// Renders the window to a PNG (for visual checks and documentation). Always dark: Cryo is dark only.
+///   --tab video|audio|subtitles|delivery|inspect|qc|atmos     the tab shown (default: video)
+///   --popup dv|transcode|useaudio|savejob|replace             one pop-up drawn alone [--size WxH] [--replace-with FILE]
+///   --pending                                                 the picture's own sound left unanswered (the Audio tab asks)
+///   --demo-running                                            the Delivery's render page with a demo job
 func snapshot(_ args: [String]) {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    app.appearance = NSAppearance(named: .darkAqua)
     let a = CLIArgs(args)
     let quality = args.contains("--quality")
     let out = a.output ?? "snapshot.png"
     func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+    let popup = value("--popup")?.lowercased()
     let project: Project
     let root: AnyView
     var size = NSSize(width: 1480, height: 940)
     var chrome = true                       // the whole window: title bar, toolbar, sidebar, inspector (sheets are drawn alone)
+    /// Work the window would show as spinners (the Dolby Vision check, files still being read): waited for, up to 8 s
+    func settle(_ p: Project) {
+        let until = Date().addingTimeInterval(8)
+        while (p.hdr.dvChecking || p.loadingCount > 0) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+    }
+    /// buildProject (the command line's rule), then what the window adds on top of it
+    func windowProject(pending: Bool) -> Project {
+        let p = buildProject(a, output: a.dest)
+        p.snapshotWindowState(pending: pending, dv: a.dv, hdr10plus: a.hdr10plus)
+        settle(p)
+        return p
+    }
     if let f = a.atmos {
         // Atmos tab with a file loaded (the SceneKit view itself may render blank offscreen)
         project = Project()
@@ -3899,7 +4301,6 @@ func snapshot(_ args: [String]) {
         root = AnyView(ContentView().environment(project))
     } else if args.contains("--syncviewer") {
         // Sync Viewer of one aligned track: [--target N] [--before] [--overlay] [--zoom SECONDS] [--nudge SAMPLES] [--beat N | -t SECONDS]
-        func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
         project = buildProject(a, output: a.dest)
         let targets = project.tracks.filter { $0.kind == .audio && $0.include && $0.id != project.syncReferenceID }
         guard !targets.isEmpty else { print("ERROR: no audio track to view (add one besides the reference)"); return }
@@ -3924,10 +4325,10 @@ func snapshot(_ args: [String]) {
         else if !args.contains("--async") { m.reloadNow() }
         chrome = false
         size = NSSize(width: 1240, height: 1000)
-        root = AnyView(SyncViewerSheet(model: m, standalone: true))
+        root = AnyView(SyncViewerSheet(model: m, standalone: true).environment(project))
     } else if args.contains("--welcome") {
         project = Project()
-        let view = WelcomeView().environment(project).background(Color(nsColor: .windowBackgroundColor))
+        let view = WelcomeView().environment(project).background(CryoWindowBackground(progress: nil))
         size = NSSize(width: 1040, height: 700)
         EngineStatus.shared.loadVersions()
         let until = Date().addingTimeInterval(20)
@@ -3935,7 +4336,6 @@ func snapshot(_ args: [String]) {
         root = AnyView(view)
     } else if args.contains("--channelsheet") {
         // Channel order sheet of the first PCM track added: --channelsheet --add FILE.wav [--target "L C R Ls Rs LFE"]
-        func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
         project = buildProject(a, output: a.dest)
         guard let t = project.tracks.first(where: { $0.canReorder }), let wav = t.wav else { print("ERROR: add a multichannel PCM WAV with --add"); return }
         guard let r = ChannelID.analyze(url: t.url, info: wav) else { print("ERROR: could not analyse"); return }
@@ -3945,10 +4345,9 @@ func snapshot(_ args: [String]) {
         if let tv = value("--target") { track.channelTarget = ChannelOrder(roles: tv.split(separator: " ").compactMap { ChannelRole(rawValue: String($0)) }) }
         chrome = false
         size = NSSize(width: 760, height: 1000)
-        root = AnyView(ChannelOrderSheet(track: .constant(track), initialReport: r).frame(width: 760, height: 1000, alignment: .top).background(Color(nsColor: .windowBackgroundColor)))
+        root = AnyView(ChannelOrderSheet(track: .constant(track), initialReport: r).frame(width: 760, height: 1000, alignment: .top).environment(project))
     } else if args.contains("--pictureviewer") {
         // Picture Sync Check: --pictureviewer FILE.mov | --pictureviewer --video V --add A [--align --ref-late-frames N]  [--point N]
-        func value(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
         project = buildProject(a, output: a.dest)
         let file = value("--pictureviewer").flatMap { $0.hasPrefix("-") ? nil : $0 }
         let made = file.map { PictureSyncModel(project: project, output: URL(fileURLWithPath: $0)) }
@@ -3964,10 +4363,11 @@ func snapshot(_ args: [String]) {
         print("check points:", m.points.map { Fmt.duration($0.cut) }.joined(separator: " "), "· showing", m.cut.map { Fmt.duration($0) } ?? "-")
         chrome = false
         size = NSSize(width: 1320, height: 1040)
-        root = AnyView(PictureSyncSheet(model: m, standalone: true))
+        root = AnyView(PictureSyncSheet(model: m, standalone: true).environment(project))
     } else if let f = value("--transcode") {
-        // The Video tab with FILE and a transcode destination (the old Transcode tab): --snapshot --transcode FILE
-        // [--to prores422hq|h264|hevc|hevcdv] -o screen.png. The plan rows below still come from the old model (wave 0).
+        // The Video tab with FILE and a transcode destination (the old Transcode tab, as the File Checker hands it over):
+        // --snapshot --transcode FILE [--to prores422hq|h264|hevc|hevcdv] -o screen.png. The plan rows printed below come
+        // from the old transcode model, which stays for the command line only.
         project = Project()
         project.mode = .video
         let toPreset = value("--to").flatMap(TranscodePreset.named) ?? .prores422HQ
@@ -3987,6 +4387,7 @@ func snapshot(_ args: [String]) {
             for r in plan.rows { print("  \(r.changed ? "→" : "=") \(r.id): \(r.from) → \(r.to)") }
             for w in plan.warnings { print("  ⚠ \(w)") }
         }
+        settle(project)
         root = AnyView(ContentView().environment(project))
     } else if let f = a.inspect {
         project = Project()
@@ -3998,23 +4399,58 @@ func snapshot(_ args: [String]) {
         project.inspector.data = d
         size = NSSize(width: 1480, height: 1400)
         root = AnyView(ContentView().environment(project))
+    } else if let popup {
+        // one pop-up drawn alone, over the project the arguments describe
+        project = windowProject(pending: popup == "useaudio" || args.contains("--pending"))
+        chrome = false
+        let view: AnyView
+        switch popup {
+        case "dv", "metadata":
+            size = NSSize(width: 760, height: 880)
+            view = AnyView(VideoMetadataPopup(project: project))
+        case "transcode":
+            size = NSSize(width: 860, height: 920)
+            view = AnyView(VideoTranscodeChooser(project: project))
+        case "useaudio":
+            guard let t = project.embeddedAudio.first else { print("ERROR: --popup useaudio needs --video FILE with its own sound"); return }
+            size = NSSize(width: 520, height: 360)
+            view = AnyView(EmbeddedAudioPopover(project: project, trackID: t.id))
+        case "savejob":
+            size = NSSize(width: 700, height: 640)
+            view = AnyView(SaveJobSheet(project: project))
+        case "replace":
+            let new = URL(fileURLWithPath: value("--replace-with") ?? "New_picture.mov")
+            project.pictureReplaceRequest = [new]
+            size = NSSize(width: 620, height: 460)
+            view = AnyView(SnapshotReplaceCard(project: project, newFile: new))
+        // ── INTEGRATOR: add `case "gallery":` here (every pop-up above on one canvas) ──
+        default:
+            print("--popup: unknown pop-up “\(popup)” (dv transcode useaudio savejob replace)"); return
+        }
+        root = AnyView(view.environment(project))
     } else {
-        project = buildProject(a, output: a.dest)
+        project = windowProject(pending: args.contains("--pending"))
         if quality { size = NSSize(width: 900, height: 760); chrome = false }
         root = quality ? AnyView(AudioOptionsView().environment(project)) : AnyView(ContentView().environment(project))
     }
+    if args.contains("--demo-running") { DeliveryQueue.shared.loadDemoRunningJob(); project.mode = .delivery }
     if let t = value("--tab") {             // --tab video|audio|subtitles|delivery|inspect|qc|atmos
         if let m = AppMode(rawValue: t.lowercased()) { project.mode = m } else { print("--tab: unknown tab “\(t)” (\(AppMode.allCases.map(\.rawValue).joined(separator: " ")))") }
     }
+    if let s = value("--size") {            // --size 800x600
+        let wh = s.lowercased().split(separator: "x").compactMap { Double($0) }
+        if wh.count == 2, wh[0] > 100, wh[1] > 100 { size = NSSize(width: wh[0], height: wh[1]) }
+    }
     if chrome && args.contains("--wide") { size = NSSize(width: 1900, height: 1000) }
-    // a sheet drawn alone needs the window colour behind it (the window provides it in the app)
-    let host = NSHostingView(rootView: chrome ? root : AnyView(root.background(Color(nsColor: .windowBackgroundColor))))
+    // a view drawn alone sits on the window's own slab (the window provides it in the app)
+    let host = NSHostingView(rootView: chrome ? root
+        : AnyView(root.frame(maxWidth: .infinity, maxHeight: .infinity).background(CryoWindowBackground(progress: nil))))
     host.sceneBridgingOptions = chrome ? [.toolbars, .title] : []
     host.frame = NSRect(origin: .zero, size: size)
     let win = NSWindow(contentRect: host.frame,
                        styleMask: chrome ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView] : [.titled, .fullSizeContentView],
                        backing: .buffered, defer: false)
-    win.appearance = NSAppearance(named: args.contains("--dark") ? .darkAqua : .aqua)
+    win.appearance = NSAppearance(named: .darkAqua)
     win.toolbarStyle = .unified
     win.contentView = host
     win.makeKeyAndOrderFront(nil)
@@ -4032,6 +4468,41 @@ func snapshot(_ args: [String]) {
     }
     try? png?.write(to: URL(fileURLWithPath: out))
     print("snapshot:", out)
+}
+
+extension Project {
+    /// What the window adds after buildProject in a snapshot: the command line's answer for the picture's own sound
+    /// ("Don't use" — it stays out and lines the rest up) or, with `pending`, no answer (the Audio tab asks); then the
+    /// Video tab's plan is told about the picture and the metadata, as a drop would
+    fileprivate func snapshotWindowState(pending: Bool, dv: String?, hdr10plus: String?) {
+        if pending { applyEmbeddedAudioDefaults() } else { for t in embeddedAudio { embeddedAudioAnswer[key(of: t)] = false } }
+        if videoSource != nil { video.didAddVideo(project: self) }
+        if let d = dv { video.didAddMetadata(kind: .dolbyVision, url: URL(fileURLWithPath: d), project: self) }
+        if let h = hdr10plus { video.didAddMetadata(kind: .hdr10Plus, url: URL(fileURLWithPath: h), project: self) }
+    }
+}
+
+/// "Replace the picture?" drawn alone for `--snapshot --popup replace` (the Video tab asks it in the app)
+fileprivate struct SnapshotReplaceCard: View {
+    let project: Project
+    let newFile: URL
+    private var old: String { project.videoSource?.url.lastPathComponent ?? "the loaded picture" }
+    private var lines: [CryoAlertCard.Line] {
+        var l = [CryoAlertCard.Line(level: .warn, title: "The alignment is cleared",
+                                    detail: "Head trims, the sync reference and how late it is vs the picture are reset — line up again on the Audio tab.")]
+        let n = project.embeddedAudio.count
+        if n > 0 { l.append(.init(level: .info, title: "The sound inside “\(old)” goes with it", detail: "\(n) track\(n == 1 ? "" : "s") from the video file, and your answers about \(n == 1 ? "it" : "them").")) }
+        let u = project.userAudio.count
+        if u > 0 { l.append(.init(level: .info, title: "Your audio stays", detail: "\(u) track\(u == 1 ? "" : "s") — only the alignment is redone.")) }
+        return l
+    }
+    var body: some View {
+        CryoAlertCard(title: "Replace the picture?", subtitle: "“\(newFile.lastPathComponent)” replaces “\(old)”.", lines: lines,
+                      actions: [.init("Replace the picture", role: .primary) { project.confirmReplacePicture() },
+                                .init("Keep the current one", role: .secondary) { project.cancelReplacePicture() }])
+            .frame(width: 560)                   // a fixed width: its height then follows the text (a max width let it grow tall)
+            .padding(30)
+    }
 }
 
 /// Command line: the sound against the picture. `--picture FILE.mov` checks a muxed file (every audio track);
