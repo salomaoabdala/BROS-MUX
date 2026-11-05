@@ -26,6 +26,56 @@ Toda atualização do BROS-MUX é registrada aqui: o que entrou, o que mudou, o 
 - **Marcação de cor do encode HDR/Dolby Vision corrigida — era o erro mais grave do app.** Um master P3-D65 (como o 2DIE4) saía marcado `colorprim=12` (P3-D65) e `colormatrix=1` (BT.709) num stream PQ, sem `chromaloc`, e com o `hdr10-opt` desligado em silêncio pelo x265 (ele só funciona com primárias 9, transfer 16, matriz 9). A camada base de um Dolby Vision 8.1 é um HDR10, e HDR10 é BT.2020; não existe matriz Y'CbCr padronizada para P3-D65 (SMPTE ST 2067-21:2020 diz textualmente que P3-D65 com Y'CbCr não é suportado). A causa era `outputColor` em `Transcode.swift`: "a matriz segue as primárias", que mandava P3-D65 para BT.709, e `isBT2020` dando falso pulava o chroma siting. Agora, num encode HDR, um master P3-D65 ou BT.709 é **convertido para BT.2020 em luz linear** (`ColorLUT.swift`: PQ decodificado → matriz 3×3 → PQ, numa LUT 3D de 65³ aplicada em float pelo `lut3d` do ffmpeg, porque este ffmpeg não tem `zscale`), e sai `bt2020 / smpte2084 / bt2020nc`, `chromaloc=2`, chroma siting top-left, caixa `colr` 9/16/9 — com o `hdr10-opt` finalmente ativo. As cores não mudam: BT.2020 é o recipiente; o mastering display continua P3-D65 no SEI, que é o lugar dele. Conferido contra a conta exata num frame real do 2DIE4: erro máximo de 0,58 código em 10 bits, 100% dos pixels dentro de 1 código. **Masters já codificados com a marcação antiga precisam ser reencodados; trocar só a etiqueta deixaria pior** (expandiria o gamut de pixels P3).
 - **Picture check: cortes deslocados em 1 frame em algumas janelas.** O ffmpeg descarta os frames anteriores ao `-ss` depois de convertê-lo para a base de tempo do vídeo (1/24 num MOV de 24 fps); o app pedia meio frame antes do frame-alvo com seis casas decimais, e isso caía ora de um lado, ora do outro do arredondamento — numa janela saía um frame a mais no início e todos os cortes daquela janela (e as miniaturas do Sync Viewer) ficavam 1 frame atrasados (visto no 2DIE4: o corte de 21:30.583 lido como 21:30.625 numa conferência de 60 janelas). Agora o seek começa um quarto de frame antes, que arredonda sempre para o frame certo.
 
+## v2.0.0 — 2026-11-05 · Beta 2.0.0 (prévia de trabalho, não publicada)
+
+Versão de trabalho, instalada ao lado do app estável (`/Applications/BROS-MUX Beta 2.0.0.app`, bundle próprio). Inclui também tudo o que está em "Em desenvolvimento" acima (a v1.7 em preparo). Projeto e regras em `PLANO-BETA-2.0.0.md`.
+
+### Adicionado
+- **Novo caminho em passos**, no lugar das abas Mux e Transcode: **01 Video → 02 Audio → 03 Subtitles → 04 Delivery**. Depois de um divisor, "CHECK A FILE": File Checker, Render QC e Atmos Visualizer. Cada passo mostra o seu estado na barra lateral e marca em âmbar o que está pendente. Atalhos ⌘1 a ⌘7.
+- **Roteamento automático:** cada arquivo solto vai para a aba a que pertence (imagem e metadados para Video, áudio para Audio, legendas para Subtitles, `.bmjob` para Delivery), com o aviso "X goes on the Y tab — added there". Uma imagem nova pergunta "Replace the picture?" e limpa o alinhamento. Várias imagens de uma vez oferecem "uma entrega por arquivo".
+- **Aba Video:**
+  - "Where will this file play?" (MOV, MP4 ou MKV);
+  - cartão "You have: …" com miniatura e metadados;
+  - análise na hora do XML Dolby Vision e do JSON HDR10+, com logo e linhas DETECTED → RECOMMENDED: frames, frame rate, Level 5 contra a letterbox medida, MaxCLL/MaxFALL zerados, P3-D65 → BT.2020, piso de qualidade × teto do Level 5.1. Cada linha tem a correção num clique;
+  - o pop-up "a imagem não carrega isso", com os destinos possíveis (HEVC 10-bit Dolby Vision 8.1 pelo x265; hardware Apple desligado, com o motivo) ou "entregar sem Dolby Vision";
+  - os assets de transcode (presets, modo, velocidade, Fonte → Destino, tamanho e tempo) dentro da própria aba.
+- **Aba Audio:**
+  - o som que veio no vídeo começa fora do arquivo e pergunta "Use it / Don't use". "Don't use" deixa a faixa com cadeado, servindo só de referência de sync;
+  - cada faixa ganha o seletor "Not in the file / Audio track 1, 2, 3…";
+  - alinhamento automático ao soltar a mix;
+  - transcode opcional para AAC (640 Kbps no 5.1, 256 Kbps no estéreo) ou PCM 24-bit, com sync, nível e ordem dos canais verificados depois de escrever. Dolby (Atmos, E-AC-3, TrueHD) sai só em cópia.
+- **Aba Subtitles:** espaço reservado. As legendas encontradas começam fora do arquivo e "Include" as põe dentro.
+- **Aba Delivery:**
+  - lista "BEFORE YOU START" com as pendências, cada uma ligada à aba dela;
+  - plano do arquivo final com a "linha de sinal" (COPY ou TRANSCODE);
+  - SAVE JOB (arquivo `.bmjob` + `.job.txt` legível); ADD TO QUEUE; START DELIVERY (⌘↩), que salva o job e o log antes de começar;
+  - o render roda solto do app e sobrevive se ele for fechado;
+  - a página de render, no estilo do Resolve: % total, etapas, frames, frame atual com miniatura, fps, ETA, achados ao vivo e uso da máquina;
+  - o relatório "HOW THIS FILE WAS MADE" ao lado do arquivo.
+- **Linguagem visual A · CRYO** em todo o app: vidro escuro congelado, luz ciano de borda que vira a barra de progresso, logos Dolby Vision e HDR10+ desenhados em vetor. A pasta `Logos/` aceita a arte oficial.
+- **Linha de comando:**
+  - `--job-file A.bmjob [B.bmjob…] [--dry-run]` roda jobs salvos sem janela;
+  - `--job-file --capture OUT.bmjob <argumentos do --job>` grava um job;
+  - `--selftest` é o autoteste do motor;
+  - no `--snapshot`: `--tab`, `--popup` (dv, transcode, useaudio, savejob, replace, gallery) e `--demo-running`.
+
+### Mudado
+- As abas Mux e Transcode deixam de existir. O transcode em lote vira "uma entrega por arquivo" na fila da Delivery.
+- O XML Dolby Vision ou o JSON HDR10+ soltos na janela não ligam mais a recodificação sozinhos: o app explica e pergunta. Na linha de comando (`--job --dv`), tudo continua como antes.
+- O app é só escuro.
+- **QC:**
+  - saída dourada: os logs de `--job` e `--transcode` têm de ser idênticos aos do binário da base;
+  - encode Dolby Vision real com um XML sintético de 120 frames;
+  - clipe com 6 monos PCM embutidos no vídeo;
+  - jobs `.bmjob` de ida e volta (cópia, ProRes em duas etapas, AAC);
+  - recusa de Dolby Vision com a imagem em cópia;
+  - capturas novas, uma por aba e por pop-up.
+
+### Corrigido
+- Nada é decidido em silêncio:
+  - um som do vídeo sem resposta não entra mais no arquivo por engano;
+  - um metadado Dolby Vision ou HDR10+ carregado com a imagem copiada impede o Start e diz por quê, em vez de sair sem o metadado.
+
 ## v1.6 — 2026-11-04
 
 ### Adicionado

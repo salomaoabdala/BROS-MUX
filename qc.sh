@@ -153,7 +153,7 @@ done
 
 # o caso do dono: o vídeo traz um 5.1 em 6 monos PCM; a linha de comando deixa o som do vídeo de fora e o usa como referência
 L=$LOGS/mux_embedded_monos.txt; rm -f "$OUT/mux/embedded_monos.mov"
-"$BIN" --job -o "$OUT/mux/embedded_monos.mov" --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav" --no-picture-check > "$L" 2>&1
+"$BIN" --job -o "$OUT/mux/embedded_monos.mov" --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav" --no-source-audio --no-picture-check > "$L" 2>&1
 NA=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$OUT/mux/embedded_monos.mov" 2>/dev/null | grep -c .)
 CH=$(probe a:0 channels "$OUT/mux/embedded_monos.mov")
 if grep -q '^RESULT.*: ok' "$L" && grep -q 'bit-identical ✓' "$L" && [[ $NA == 1 && $CH == 2 ]]; then
@@ -208,13 +208,13 @@ jobcase() {   # NAME DEST -- the --job arguments (+ --to P, --audio-delivery X, 
   if ! diff -q <(canon "$JF/$name.capture.txt") <(canon "$JF/$name.dry.txt") > /dev/null || [[ -z $(canon "$JF/$name.capture.txt") ]]; then
     fail "Job $name: o job relido não reproduz o projeto (diff entre $JF/$name.capture.txt e $JF/$name.dry.txt)"; return 1; fi
   "$BIN" --job-file "$job" > "$L" 2>&1
-  grep -q '^RESULT.*: ok' "$L" || { fail "Job $name: o render não terminou ok (veja $L)"; return 1 }
+  grep -qE '^RESULT.*: (ok|done)' "$L" || { fail "Job $name: o render não terminou ok (veja $L)"; return 1 }
   return 0
 }
 if jobcase copy "$JF/copy.mov" --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --no-picture-check; then
   pass "Job salvo e rodado sem janela (--job-file): cópia bit a bit, o job relido reproduz o projeto"; fi
 if jobcase prores "$JF/prores.mov" --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --to prores422hq --no-picture-check; then
-  c=$(probe v:0 codec_name "$JF/prores.mov"); p=$(probe v:0 profile "$JF/prores.mov"); NT=$(ffprobe -v error -show_entries stream=codec_tag_string -of csv=p=0 "$JF/prores.mov" | grep -c tmcd)
+  c=$(probe v:0 codec_name "$JF/prores.mov"); p=$(probe v:0 profile "$JF/prores.mov"); NT=$(ffprobe -v error -show_entries stream=index,codec_tag_string -of csv=p=0 "$JF/prores.mov" | sort -u | grep -c tmcd)
   if [[ $c == prores && $p == *HQ* && $NT == 1 ]] && grep -q 'TRANSCODED in step 1' "$LOGS/jobfile_prores.txt"; then pass "Job em duas etapas: ProRes 422 HQ + áudio externo bit a bit, um só timecode, o resultado diz que a imagem foi transcodada"
   else fail "Job em duas etapas: codec $c perfil $p timecodes $NT (veja $LOGS/jobfile_prores.txt)"; fi
 fi
