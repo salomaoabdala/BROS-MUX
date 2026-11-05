@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC Dolby Vision metadata for BROS-MUX QC only: 120 frames at 24 fps, 2 shots, made-up values. Not from any film. -->
+<DolbyLabsMDF xmlns="http://www.dolby.com/schemas/dvmd/4_0_2">
+  <Version>4.0.2</Version>
+  <Outputs>
+    <Output>
+      <CompositionName>BROS-MUX QC synthetic 120f</CompositionName>
+      <UniqueID>00000000-0000-0000-0000-00000000b805</UniqueID>
+      <NumberVideoTracks>1</NumberVideoTracks>
+      <CanvasAspectRatio>1.77778</CanvasAspectRatio>
+      <ImageAspectRatio>1.77778</ImageAspectRatio>
+      <Video>
+        <Track>
+          <TrackName>Video</TrackName>
+          <UniqueID>00000000-0000-0000-0000-00000000b806</UniqueID>
+          <EditRate>24 1</EditRate>
+          <ColorEncoding>
+            <Primaries><Red>0.68 0.32</Red><Green>0.265 0.69</Green><Blue>0.15 0.06</Blue></Primaries>
+            <WhitePoint>0.3127 0.329</WhitePoint>
+            <PeakBrightness>10000</PeakBrightness><MinimumBrightness>0</MinimumBrightness>
+            <Encoding>pq</Encoding><ColorSpace>rgb</ColorSpace><SignalRange>computer</SignalRange>
+          </ColorEncoding>
+          <Level6 level="6"><MaxCLL>1000</MaxCLL><MaxFALL>400</MaxFALL></Level6>
+          <PluginNode>
+            <DVGlobalData level="0">
+              <MasteringDisplay>
+                <ID>20</ID><Name>1000-nit, P3, D65, ST.2084, Full</Name>
+                <Primaries><Red>0.68 0.32</Red><Green>0.265 0.69</Green><Blue>0.15 0.06</Blue></Primaries>
+                <WhitePoint>0.3127 0.329</WhitePoint><PeakBrightness>1000</PeakBrightness><MinimumBrightness>0.0001</MinimumBrightness><DiagonalSize>42</DiagonalSize>
+              </MasteringDisplay>
+              <TargetDisplay>
+                <ID>1</ID><Name>100-nit, BT.709, BT.1886, Full (HOME)</Name>
+                <Primaries><Red>0.64 0.33</Red><Green>0.3 0.6</Green><Blue>0.15 0.06</Blue></Primaries>
+                <WhitePoint>0.3127 0.329</WhitePoint><PeakBrightness>100</PeakBrightness><MinimumBrightness>0.005</MinimumBrightness><EOTF>gamma_bt1886</EOTF><DiagonalSize>42</DiagonalSize>
+              </TargetDisplay>
+            </DVGlobalData>
+            <Level254 level="254"><DMMode>0</DMMode><DMVersion>2</DMVersion><CMVersion>4 1</CMVersion></Level254>
+          </PluginNode>
+          <Shot>
+            <UniqueID>00000000-0000-0000-0000-0000000051a1</UniqueID>
+            <Record><In>0</In><Duration>60</Duration></Record>
+            <PluginNode>
+                <DVDynamicData>
+                  <Level1 level="1"><ImageCharacter>0 0.25 0.6</ImageCharacter></Level1>
+                  <Level2 level="2"><TID>1</TID><Trim>0 0 0 -0.01 -0.1 0.5 0 0 0</Trim></Level2>
+                  <Level5 level="5"><AspectRatios>1.77778 1.77778</AspectRatios></Level5>
+                  <Level9 level="9"><SourceColorModel>255</SourceColorModel><SourceColorPrimary>0.68 0.32 0.265 0.69 0.15 0.06 0.3127 0.329</SourceColorPrimary></Level9>
+                </DVDynamicData>
+            </PluginNode>
+            <Frame><EditOffset>0</EditOffset><PluginNode>
+                <DVDynamicData>
+                  <Level1 level="1"><ImageCharacter>0 0.25 0.6</ImageCharacter></Level1>
+                  <Level2 level="2"><TID>1</TID><Trim>0 0 0 -0.01 -0.1 0.5 0 0 0</Trim></Level2>
+                  <Level5 level="5"><AspectRatios>1.77778 1.77778</AspectRatios></Level5>
+                  <Level9 level="9"><SourceColorModel>255</SourceColorModel><SourceColorPrimary>0.68 0.32 0.265 0.69 0.15 0.06 0.3127 0.329</SourceColorPrimary></Level9>
+                </DVDynamicData>
+            </PluginNode></Frame>
+          </Shot>
+          <Shot>
+            <UniqueID>00000000-0000-0000-0000-0000000051a2</UniqueID>
+            <Record><In>60</In><Duration>60</Duration></Record>
+            <PluginNode>
+                <DVDynamicData>
+                  <Level1 level="1"><ImageCharacter>0 0.35 0.7</ImageCharacter></Level1>
+                  <Level2 level="2"><TID>1</TID><Trim>0 0 0 -0.01 -0.1 0.5 0 0 0</Trim></Level2>
+                  <Level5 level="5"><AspectRatios>1.77778 1.77778</AspectRatios></Level5>
+                  <Level9 level="9"><SourceColorModel>255</SourceColorModel><SourceColorPrimary>0.68 0.32 0.265 0.69 0.15 0.06 0.3127 0.329</SourceColorPrimary></Level9>
+                </DVDynamicData>
+            </PluginNode>
+            <Frame><EditOffset>0</EditOffset><PluginNode>
+                <DVDynamicData>
+                  <Level1 level="1"><ImageCharacter>0 0.35 0.7</ImageCharacter></Level1>
+                  <Level2 level="2"><TID>1</TID><Trim>0 0 0 -0.01 -0.1 0.5 0 0 0</Trim></Level2>
+                  <Level5 level="5"><AspectRatios>1.77778 1.77778</AspectRatios></Level5>
+                  <Level9 level="9"><SourceColorModel>255</SourceColorModel><SourceColorPrimary>0.68 0.32 0.265 0.69 0.15 0.06 0.3127 0.329</SourceColorPrimary></Level9>
+                </DVDynamicData>
+            </PluginNode></Frame>
+          </Shot>
+        </Track>
+      </Video>
+    </Output>
+  </Outputs>
+</DolbyLabsMDF>
