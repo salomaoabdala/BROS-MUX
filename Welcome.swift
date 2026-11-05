@@ -79,7 +79,7 @@ struct WelcomeView: View {
                     ABMark(color: .primary).frame(height: 64)
                     VStack(spacing: 4) {
                         (Text("BROS-MUX").font(.system(size: 34, weight: .semibold, design: .rounded))
-                         + Text(" (v.\(AppInfo.version))").font(.system(size: 20, weight: .regular, design: .rounded)).foregroundStyle(.secondary))
+                         + Text(" (\(AppInfo.label))").font(.system(size: 20, weight: .regular, design: .rounded)).foregroundStyle(.secondary))
                             .tracking(2)
                         Text("Lossless muxing, sync and QC for film delivery").font(.title3).foregroundStyle(.secondary)
                     }
