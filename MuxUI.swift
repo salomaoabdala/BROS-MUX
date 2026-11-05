@@ -1,160 +1,9 @@
-// BROS-MUX — the window (sidebar, toolbar, inspector), the Mux screen and its sheets.
+// BROS-MUX — the old Mux screen and its sheets (the Audio tab's owner restyles or retires them). The window moved to
+// Shell.swift, the seals to Cryo.swift, the output/result pieces to DeliveryParts.swift.
 // Pure interface: the engine (probing, trimming, MP4Box, verification, sync) lives in BrosMux.swift.
 
 import SwiftUI
 import AppKit
-
-// MARK: - Window: sidebar · content · inspector
-
-struct ContentView: View {
-    @Environment(Project.self) private var project
-    @State private var dropTargeted = false
-    @State private var columns = NavigationSplitViewVisibility.all
-    @State private var inspectorShown = true
-
-    var body: some View {
-        @Bindable var project = project
-        NavigationSplitView(columnVisibility: $columns) {
-            Sidebar(selection: $project.mode)
-        } detail: {
-            Group {
-                switch project.mode {
-                case .mux: MuxContent(targeted: dropTargeted)
-                case .transcode: TranscodeView(targeted: dropTargeted)
-                case .inspect: InspectorView(targeted: dropTargeted)
-                case .atmos: AtmosView(targeted: dropTargeted)
-                case .qc: RenderQCView(targeted: dropTargeted)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle(project.mode.label)
-            .navigationSubtitle(subtitle)
-            .toolbar { ModeToolbar(project: project, inspectorShown: $inspectorShown) }
-            .inspector(isPresented: inspectorBinding) {
-                Group {
-                    switch project.mode {
-                    case .mux: MuxInspector()
-                    case .transcode: TranscodeInspector()
-                    case .atmos: AtmosInspector()
-                    case .qc: RenderQCInspector()
-                    case .inspect: EmptyView()
-                    }
-                }
-                .inspectorColumnWidth(min: 340, ideal: DS.inspectorWidth, max: 600)
-            }
-        }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard project.mode != .mux || !project.busy else { return false }
-            if project.mode == .qc { if let u = urls.first { RenderQCModel.shared.open(u) }; return true }
-            project.add(urls); return true
-        } isTargeted: { dropTargeted = $0 }
-    }
-
-    /// The File Checker has no inspector: everything it knows is on its page
-    var inspectorBinding: Binding<Bool> {
-        Binding(get: { inspectorShown && project.mode != .inspect }, set: { inspectorShown = $0 })
-    }
-
-    var subtitle: String {
-        switch project.mode {
-        case .mux: return project.outputURL?.lastPathComponent ?? "Abdala Brothers"
-        case .transcode: return TranscodeModel.shared.selected?.output.lastPathComponent ?? "Abdala Brothers"
-        case .inspect: return project.inspector.url?.lastPathComponent ?? "Abdala Brothers"
-        case .atmos: return project.atmos.url?.lastPathComponent ?? "Abdala Brothers"
-        case .qc: return RenderQCModel.shared.url?.lastPathComponent ?? "Abdala Brothers"
-        }
-    }
-}
-
-/// The three areas of the app
-struct Sidebar: View {
-    @Binding var selection: AppMode
-
-    var body: some View {
-        List(selection: Binding(get: { Optional(selection) }, set: { if let m = $0 { selection = m } })) {
-            ForEach(AppMode.allCases) { m in
-                Label(m.label, systemImage: m.symbol).tag(m)
-            }
-        }
-        .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 180, ideal: DS.sidebarWidth, max: 280)
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 8) {
-                ABMark(color: .secondary).frame(height: 14)
-                Text("Abdala Brothers").font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 16).padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-/// Toolbar of the current area: files on the leading side, the primary action and the inspector on the trailing side
-struct ModeToolbar: ToolbarContent {
-    let project: Project
-    @Binding var inspectorShown: Bool
-
-    var body: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button { if project.mode == .qc { RenderQCModel.shared.pick() } else { project.openPanel() } } label: { Label(project.mode == .mux || project.mode == .transcode ? "Add Files" : "Open File", systemImage: "plus") }
-                .help(project.mode == .mux || project.mode == .transcode ? "Add files (⌘O)" : "Open a file (⌘O)")
-                .disabled((project.mode == .mux && project.busy) || (project.mode == .transcode && TranscodeModel.shared.busy))
-            if project.mode == .mux {
-                Button { project.clear() } label: { Label("Clear All", systemImage: "trash") }
-                    .help("Start over (⌘N)")
-                    .disabled(project.tracks.isEmpty || project.busy)
-            }
-            if project.mode == .transcode {
-                Button { TranscodeModel.shared.clear() } label: { Label("Clear All", systemImage: "trash") }
-                    .help("Empty the queue")
-                    .disabled(TranscodeModel.shared.items.isEmpty || TranscodeModel.shared.busy)
-            }
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
-            switch project.mode {
-            case .mux:
-                if project.state == .running {
-                    ProgressView().controlSize(.small)
-                    Button("Cancel", role: .cancel) { project.cancel() }
-                } else {
-                    Button { project.run() } label: { Text(project.hdr.encode ? "Re-encode & Mux" : "Mux").padding(.horizontal, 6) }
-                        .buttonStyle(.borderedProminent)
-                        .tint(project.hdr.encode ? .orange : .accentColor)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(!project.canRun)
-                        .help(project.hdr.encode ? "Re-encode the picture (HEVC 10-bit) and mux (⌘↩)" : "Create the final file (⌘↩)")
-                }
-            case .transcode:
-                let m = TranscodeModel.shared
-                if m.running {
-                    ProgressView().controlSize(.small)
-                    Button("Cancel", role: .cancel) { m.cancel() }
-                } else {
-                    let n = m.pending.count
-                    Button { m.start() } label: { Text(n > 1 ? "Transcode \(n) files" : "Transcode").padding(.horizontal, 6) }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.orange)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(!m.canRun)
-                        .help("Write the new file(s) — the originals are never touched (⌘↩)")
-                }
-            case .inspect:
-                Button { project.inspector.saveReport() } label: { Label("Save Report…", systemImage: "square.and.arrow.down") }
-                    .help("Save the check report as a text file")
-                    .disabled(project.inspector.url == nil)
-                Button { if let u = project.inspector.url { NSWorkspace.shared.activateFileViewerSelecting([u]) } } label: { Label("Show in Finder", systemImage: "folder") }
-                    .help("Show the file in the Finder")
-                    .disabled(project.inspector.url == nil)
-            case .atmos, .qc:
-                EmptyView()
-            }
-            if project.mode != .inspect {
-                Button { inspectorShown.toggle() } label: { Label("Inspector", systemImage: "sidebar.trailing") }
-                    .help("Show or hide the inspector")
-            }
-        }
-    }
-}
 
 // MARK: - Mux screen
 
@@ -171,7 +20,7 @@ struct MuxContent: View {
             TabStrip.mux
             if project.hdr.encode { ReencodeBanner() }
             if project.tracks.isEmpty && project.loadingCount == 0 {
-                NoticeStack(hasResult: hasResult)
+                NoticeStack(tab: .audio, hasResult: hasResult)
                     .padding(.horizontal, DS.margin).padding(.top, DS.gap)
                 EmptyDropView(targeted: targeted, title: "Drop your files here",
                               subtitle: "ProRes or H.264 video · IMF packages (HDR, Dolby Vision) · WAV/PCM audio · Dolby Atmos E-AC-3 JOC or TrueHD · SRT/VTT subtitles")
@@ -191,18 +40,21 @@ struct MuxContent: View {
     }
 }
 
-/// Missing tools, what went wrong with the files, and the result of the last mux. Nothing at all when there is nothing to say.
+/// Missing tools, what went wrong with the files (this tab's notices only), and the result of the last mux.
+/// Nothing at all when there is nothing to say.
 struct NoticeStack: View {
     @Environment(Project.self) private var project
+    let tab: AppMode
     let hasResult: Bool
 
     var body: some View {
-        if !Tools.missing.isEmpty || !project.notices.isEmpty || hasResult {
+        let notices = project.notices(for: tab)
+        if !Tools.missing.isEmpty || !notices.isEmpty || hasResult {
             VStack(spacing: DS.rowGap) {
                 if !Tools.missing.isEmpty {
                     NoticeRow(text: "Missing tools (\(Tools.missing.joined(separator: ", "))). Run: brew install gpac media-info", level: .fail)
                 }
-                ForEach(Array(project.notices.enumerated()), id: \.offset) { _, n in NoticeRow(text: n, level: .warn) }
+                ForEach(notices) { n in NoticeRow(text: n.text, level: n.level) }
                 ResultBanner()
             }
         }
@@ -266,7 +118,7 @@ struct TrackListView: View {
             GeometryReader { geo in
                 ScrollViewReader { proxy in
                     List {
-                        NoticeStack(hasResult: hasResult)
+                        NoticeStack(tab: .audio, hasResult: hasResult)
                             .id("notices")
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 4, leading: DS.margin, bottom: DS.rowGap, trailing: DS.margin))
@@ -491,131 +343,6 @@ struct TrackRow: View {
     }
 }
 
-// MARK: - Result
-
-struct ResultBanner: View {
-    @Environment(Project.self) private var project
-    @State private var showLog = false
-    @State private var pictureModel: PictureSyncModel?
-
-    var body: some View {
-        switch project.state {
-        case .done(let url):
-            let s = project.resultState
-            banner(color: s == .ok ? .green : s == .warning ? .orange : .red,
-                   icon: s == .ok ? "checkmark.circle.fill" : s == .warning ? "exclamationmark.triangle.fill" : "xmark.octagon.fill",
-                   title: s == .ok ? "Done — \(url?.lastPathComponent ?? "")" : s == .warning ? "File created, with warnings" : "File created, but a check failed") {
-                if let insp = project.resultInspection {
-                    if !project.hdr.encode, project.container != .mkv {
-                        AcademySeal(level: insp.level, caption: "Verified on the final file", compact: true).padding(.top, 6)
-                    }
-                    ZidooSeal(level: insp.zidooLevel, caption: "Read from the final file · " + Zidoo.caveat, compact: true).padding(.top, 6)
-                }
-                HStack(spacing: 8) {
-                    if let url {
-                        Button("Inspect Final File") { project.inspector.load(url); project.mode = .inspect }
-                        if project.included.contains(where: \.isAtmos) {
-                            Button("Visualize Atmos") { project.atmos.load(url); project.mode = .atmos }
-                        }
-                        Button("Picture Sync Check…") { pictureModel = PictureSyncModel(project: project, output: url) }
-                            .help("Frames around a hard cut, the waveform under them and a looping preview of the muxed file")
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                    }
-                    Button("Log") { showLog = true }
-                }
-                .padding(.top, 6)
-            } detail: {
-                ForEach(Array(project.resultLines.enumerated()), id: \.offset) { _, l in
-                    Text("• " + l).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .sheet(isPresented: $showLog) { LogSheet() }
-            .sheet(item: $pictureModel) { PictureSyncSheet(model: $0) }
-        case .failed:
-            banner(color: .red, icon: "xmark.octagon.fill", title: "That didn't work") {
-                Button("Show Full Log") { showLog = true }.padding(.top, 6)
-            } detail: {
-                ForEach(Array(project.resultLines.enumerated()), id: \.offset) { _, l in
-                    Text(l).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .sheet(isPresented: $showLog) { LogSheet() }
-        case .cancelled:
-            banner(color: .secondary, icon: "stop.circle.fill", title: "Cancelled — nothing was written to the destination.") { EmptyView() } detail: { EmptyView() }
-        default:
-            EmptyView()
-        }
-    }
-
-    func banner<A: View, D: View>(color: Color, icon: String, title: String,
-                                  @ViewBuilder actions: () -> A, @ViewBuilder detail: () -> D) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon).font(.title2).foregroundStyle(color).symbolRenderingMode(.hierarchical)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.headline)
-                detail()
-                actions()
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).fill(color.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(color.opacity(0.22), lineWidth: 1))
-    }
-}
-
-// MARK: - The Academy seal
-
-/// A stylized award statuette (figure on a base)
-struct StatuetteShape: Shape {
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        let w = r.width, h = r.height, x = r.minX, y = r.minY
-        func pt(_ a: CGFloat, _ b: CGFloat) -> CGPoint { CGPoint(x: x + a * w, y: y + b * h) }
-        p.addEllipse(in: CGRect(x: x + 0.39 * w, y: y, width: 0.22 * w, height: 0.11 * h))                 // head
-        p.addRect(CGRect(x: x + 0.46 * w, y: y + 0.105 * h, width: 0.08 * w, height: 0.03 * h))              // neck
-        p.move(to: pt(0.24, 0.15)); p.addLine(to: pt(0.76, 0.15))                                             // shoulders
-        p.addQuadCurve(to: pt(0.66, 0.30), control: pt(0.80, 0.22))
-        p.addLine(to: pt(0.62, 0.47)); p.addLine(to: pt(0.38, 0.47)); p.addLine(to: pt(0.34, 0.30))
-        p.addQuadCurve(to: pt(0.24, 0.15), control: pt(0.20, 0.22)); p.closeSubpath()                      // torso with arms
-        p.move(to: pt(0.38, 0.47)); p.addLine(to: pt(0.62, 0.47)); p.addLine(to: pt(0.57, 0.76))
-        p.addLine(to: pt(0.43, 0.76)); p.closeSubpath()                                                       // legs
-        p.addRoundedRect(in: CGRect(x: x + 0.30 * w, y: y + 0.76 * h, width: 0.40 * w, height: 0.06 * h), cornerSize: CGSize(width: 2, height: 2))
-        p.addRoundedRect(in: CGRect(x: x + 0.18 * w, y: y + 0.82 * h, width: 0.64 * w, height: 0.18 * h), cornerSize: CGSize(width: 3, height: 3)) // base
-        return p
-    }
-}
-
-struct AcademySeal: View {
-    let level: AcademyLevel?
-    let caption: String
-    var compact = false
-
-    var body: some View {
-        let color = level?.color ?? Color.secondary
-        let d: CGFloat = compact ? 48 : 64
-        HStack(spacing: 12) {
-            ZStack {
-                Circle().fill(color.opacity(0.12))
-                Circle().strokeBorder(color, lineWidth: 2)
-                StatuetteShape()
-                    .fill(Color(red: 0.85, green: 0.66, blue: 0.22))
-                    .frame(width: d * 0.33, height: d * 0.7)
-            }
-            .frame(width: d, height: d)
-            .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(level?.title ?? "Academy specs: —")
-                    .font(compact ? .headline : .title3.weight(.semibold)).foregroundStyle(color)
-                Text(level?.explanation ?? "Add a video and audio to evaluate.")
-                    .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text(caption).font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-}
-
 // MARK: - Inspector of the Mux screen
 
 struct MuxInspector: View {
@@ -769,212 +496,7 @@ struct SyncLights: View {
     }
 }
 
-/// Output: container, destination, quality options, progress and the command behind it all
-struct OutputSection: View {
-    @Environment(Project.self) private var project
-    @State private var showCommand = false
-    @State private var showQuality = false
-
-    var body: some View {
-        @Bindable var project = project
-        Section {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Format")
-                Picker("Format", selection: $project.container) {
-                    ForEach(Container.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-                .disabled(project.busy)
-            }
-            // Render-style destination: folder, file name, and whether it fits
-            VStack(alignment: .leading, spacing: DS.rowGap) {
-                HStack {
-                    Text("Save to")
-                    Spacer()
-                    Button("Choose Folder…") { project.chooseOutputFolder() }.controlSize(.small).disabled(project.tracks.isEmpty || project.busy)
-                }
-                Label {
-                    Text(project.outputFolder?.path ?? "Add files to set the destination")
-                        .font(.caption).lineLimit(2).truncationMode(.middle)
-                        .foregroundStyle(project.outputFolder == nil ? Color.secondary : Color.primary)
-                        .textSelection(.enabled)
-                } icon: {
-                    Image(systemName: "folder").foregroundStyle(.secondary)
-                }
-                if project.outputURL != nil {
-                    HStack(spacing: 6) {
-                        Text("File name")
-                        TextField("", text: Binding(get: { project.outputName }, set: { project.outputName = $0 }), prompt: Text("File name"))
-                            .labelsHidden().textFieldStyle(.roundedBorder).disabled(project.busy)
-                        Text(".\(project.container.rawValue)").foregroundStyle(.secondary).monospaced()
-                    }
-                    .font(.callout)
-                }
-            }
-            if !project.tracks.isEmpty {
-                LabeledContent("Estimated size") { Text(Fmt.bytes(project.estimatedSize)).monospacedDigit() }
-                if let free = project.outputFree {
-                    let need = project.outputNeeded
-                    let fits = free >= need
-                    VStack(alignment: .leading, spacing: 4) {
-                        LabeledContent("Free on that drive") {
-                            Text(Fmt.bytes(free)).monospacedDigit().foregroundStyle(fits ? Color.primary : Color.red)
-                        }
-                        ProgressView(value: min(1, need / max(free, 1))).tint(fits ? (need / free > 0.8 ? .orange : .green) : .red)
-                        Text(fits ? "needs about \(Fmt.bytes(need)) while muxing (temp copy + final file)" : "not enough: about \(Fmt.bytes(need)) is needed while muxing — choose another drive")
-                            .font(.caption).foregroundStyle(fits ? Color.secondary : Color.red).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-            HStack {
-                Button { showQuality = true } label: { Label("Quality & Advanced…", systemImage: "slider.horizontal.3") }
-                    .disabled(project.tracks.isEmpty || project.busy)
-                Spacer()
-            }
-            .sheet(isPresented: $showQuality) { QualitySheet() }
-            if project.state == .running {
-                RunMonitorView(progress: project.progress, stage: project.stage, folder: project.outputFolder)
-            }
-            DisclosureGroup(isExpanded: $showCommand) {
-                TerminalBox(text: project.commandPreview.isEmpty ? "—" : project.commandPreview, scrolls: false)
-            } label: {
-                Text(project.hdr.encode ? "Commands (for reference)" : "MP4Box command (for reference)").foregroundStyle(.secondary)
-            }
-        } header: {
-            Text("Output")
-        }
-    }
-}
-
-/// Academy prediction for SDR deliveries; for playback versions, where the file will play
-struct AcademySection: View {
-    @Environment(Project.self) private var project
-
-    var body: some View {
-        if project.hdr.encode || project.container == .mkv {
-            Section {
-                PlaybackPanel()
-            } header: {
-                Text("Where it plays")
-            }
-        } else {
-            Section {
-                AcademySeal(level: project.predictedLevel, caption: "Predicted from the sources · verified on the final file after muxing", compact: true)
-                let fails = project.predictedChecks.filter { $0.level == .fail }
-                ForEach(Array(fails.prefix(3).enumerated()), id: \.offset) { _, c in
-                    Label {
-                        Text("\(c.title): \(c.detail)").font(.caption).fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-                    }
-                }
-            } header: {
-                Text("Academy specs")
-            }
-        }
-        Section {
-            ZidooSeal(level: project.predictedZidooLevel, caption: "Predicted from the sources · " + Zidoo.caveat, compact: true)
-            let issues = project.predictedZidooChecks.filter { $0.level == .fail || $0.level == .warn }
-            ForEach(Array(issues.prefix(3).enumerated()), id: \.offset) { _, c in
-                Label {
-                    Text("\(c.title): \(c.detail)").font(.caption).fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: c.level.icon).foregroundStyle(c.level.color)
-                }
-            }
-        } header: {
-            Text("Zidoo (screening room)")
-        }
-    }
-}
-
-/// What goes in and what comes out, track by track
-struct SummarySections: View {
-    @Environment(Project.self) private var project
-
-    var body: some View {
-        let inc = project.included
-        let ref = project.reference
-        let audiosOut = inc.filter { $0.kind == .audio }
-        let video = inc.first { $0.kind == .video }
-        Section {
-            if let v = video { KeyValueRow(label: "Video", value: videoLine(v), chip: v.bitDepth > 0 ? "\(v.bitDepth)-bit" : nil) }
-            ForEach(Array(project.tracks.filter { $0.kind == .audio && ($0.include || $0.id == ref?.id) }.enumerated()), id: \.offset) { _, a in
-                KeyValueRow(label: a.id == ref?.id ? "Reference" : "Audio", value: audioLine(a), chip: a.quality.text, chipTint: a.quality.lossless ? .green : .orange)
-            }
-        } header: {
-            Text("Input")
-        }
-        Section {
-            if video != nil, let e = project.encodePlan {
-                KeyValueRow(label: "Video", value: "HEVC Main 10 · \(e.width)×\(e.height) · \(Probe.fps("\(e.fps.num)/\(e.fps.den)") ?? "") fps · 10-bit 4:2:0 · \(e.formats)",
-                            chip: "Re-encoded for playback", chipTint: .orange)
-                KeyValueRow(label: "Color tags", value: e.outputColor.text + (e.hdr.map { " · HDR10 \($0.mastering.text)" } ?? ""))
-            } else if let v = video {
-                KeyValueRow(label: "Video", value: videoLine(v), chip: "Identical (no re-encode)", chipTint: .green)
-                KeyValueRow(label: "Color tags", value: colorLine(v))
-            }
-            LabeledContent("Audio tracks") { Text("\(audiosOut.count)") }
-            ForEach(Array(audiosOut.enumerated()), id: \.offset) { i, a in
-                KeyValueRow(label: "Audio \(i + 1)", value: audioLine(a) + outAudioExtra(a),
-                            chip: (project.planText(for: a) != nil ? "Identical + trimmed" : "Identical (bit-exact)") + (a.channelPermutation != nil ? " + reordered" : ""), chipTint: .green)
-            }
-        } header: {
-            Text("Output · \(project.container.rawValue.uppercased()) · ~\(Fmt.bytes(project.estimatedSize))")
-        }
-    }
-
-    func videoLine(_ v: Track) -> String {
-        var parts = [v.codecName + (v.mi?["Format_Profile"].flatMap { v.codecName.contains($0) ? nil : " \($0)" } ?? "")]
-        if let w = v.mi?["Width"], let h = v.mi?["Height"] { parts.append("\(w)×\(h)") }
-        if let fr = v.mi?["FrameRate"] { parts.append("\(fr) fps") }
-        let chroma = v.mi?["ChromaSubsampling"].map { " \($0)" } ?? ""
-        if v.bitDepth > 0 { parts.append("\(v.bitDepth)-bit\(chroma)") }
-        if v.bitRate > 0 { parts.append(Fmt.bitrate(v.bitRate)) }
-        return parts.joined(separator: " · ")
-    }
-    func audioLine(_ a: Track) -> String {
-        var parts = [a.codecName]
-        if a.sampleRate > 0 { parts.append(Fmt.hz(a.sampleRate)) }
-        if a.bitDepth > 0 && a.isPCM { parts.append("\(a.bitDepth)-bit") }
-        parts.append("\(a.channels) ch")
-        if a.bitRate > 0 { parts.append(Fmt.bitrate(a.bitRate) + (a.mi?["BitRate_Mode"] == "CBR" ? " CBR" : "")) }
-        if let ci = a.mi?["ComplexityIndex"] { parts.append("CI \(ci)") }
-        return parts.joined(separator: " · ")
-    }
-    func outAudioExtra(_ a: Track) -> String {
-        guard a.isPCM else { return "" }
-        if project.container == .mov, let tag = a.outputLayoutTag(writeLabels: project.writeChannelMap) {
-            return " · " + ChannelMap.layoutName(tag)
-        }
-        return " · no channel labels"
-    }
-    func colorLine(_ v: Track) -> String {
-        if project.fixColorTag { return "BT.709 / BT.709 / BT.709 (tag corrected)" }
-        let p = v.mi?["colour_primaries"] ?? "—", t = v.mi?["transfer_characteristics"] ?? (v.mi?["Gamma"].map { "Gamma \($0)" } ?? "—"), m = v.mi?["matrix_coefficients"] ?? "—"
-        return "\(p) / \(t) / \(m) (primaries / transfer / matrix)"
-    }
-}
-
 // MARK: - Sheets
-
-struct LogSheet: View {
-    @Environment(Project.self) private var project
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        VStack(spacing: 0) {
-            SheetHeader(title: "MP4Box Log") { EmptyView() }
-            TerminalBox(text: project.log).padding(.horizontal, 20).padding(.top, 8)
-            HStack {
-                Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(project.log, forType: .string) }
-                Spacer()
-                Button("Close") { dismiss() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-            }
-            .padding(20)
-        }
-        .frame(width: 760, height: 480)
-    }
-}
 
 struct QualitySheet: View {
     @Environment(Project.self) private var project

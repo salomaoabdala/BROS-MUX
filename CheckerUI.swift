@@ -81,9 +81,9 @@ struct InspectorView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Label("The picture isn't what the Academy asks for (\(codec.detail)).", systemImage: codec.level.icon).foregroundStyle(codec.level.color).font(.callout).fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    Button("Fix → Transcode to ProRes 422 HQ") { TranscodeModel.shared.open(u, preset: .prores422HQ); project.mode = .transcode }
+                    Button("Fix → Transcode to ProRes 422 HQ") { project.openInVideoTab(u, target: .transcode(VideoTranscodeSettings(preset: "prores422HQ"))); project.mode = .video }
                         .tint(.orange).buttonStyle(.borderedProminent)
-                        .help("Opens the Transcode tab with this file and the Academy preset (a new file is written; this one isn't touched)")
+                        .help("Opens the Video tab with this file and the Academy preset (a new file is written; this one isn't touched)")
                 }
                 .padding(.vertical, 4)
             }

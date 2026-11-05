@@ -864,11 +864,18 @@ final class TranscodeRunner {
     let cancel = CancelFlag()
     var onStage: (String, Double) -> Void = { _, _ in }
     var onLog: (String) -> Void = { _ in }
+    // Beta 2.0.0 (nil by default; forwarded to the inner JobRunner on the DV/HDR10+ path). Wave 0: declared, not called yet.
+    var onProgress: ((JobProgress) -> Void)?
+    var onFinding: ((String) -> Void)?
+    var onWorkFolder: ((URL) -> Void)?
     private var inner: JobRunner?
 
     init(plan: TranscodePlan, output: URL, runQC: Bool, runVMAF: Bool) {
         self.plan = plan; self.output = output; self.runQC = runQC; self.runVMAF = runVMAF
     }
+
+    /// The stages this transcode will go through, with their weight in the overall % (wave 0: none yet)
+    static func plannedStages(_ plan: TranscodePlan, runQC: Bool, runVMAF: Bool) -> [(stage: JobProgress.Stage, weight: Double)] { [] }
     func requestCancel() { cancel.set(); inner?.requestCancel() }
 
     /// Problems that stop the job before anything is written
@@ -1055,6 +1062,23 @@ final class TranscodeRunner {
         let verdict = mean >= 93 ? "visually transparent" : mean >= 80 ? "good" : mean >= 60 ? "visible loss" : "poor"
         return (mean, String(format: "VMAF vs the source: %.1f (%@) on %d stretch%@ of %.0f s · %@", mean, scores.map { String(format: "%.1f", $0) }.joined(separator: ", "), scores.count, scores.count == 1 ? "" : "es", len, verdict))
     }
+}
+
+// MARK: - Audio TRANSCODE (Beta 2.0.0): the pre-step the Delivery runs before JobRunner
+
+/// Audio TRANSCODE pre-step (run by the Delivery before JobRunner); the input is the bytes JobRunner would mux.
+/// Wave 0: declared with the contract's signatures; the engine owner (E2) writes the real ones.
+enum AudioTranscode {
+    /// Why this track can't become `to` (AAC > 8 ch, float > 0 dBFS → PCM 24, Dolby source…); nil = it can
+    static func problem(_ t: Track, to: AudioDelivery) -> String? { nil }
+    /// Writes <folder>/audio-<n>.m4a (AAC, edit list kept) or .wav (PCM 24-bit, -rf64 auto); returns it
+    static func prepare(_ t: Track, plan: TrimPlan?, to: AudioDelivery, folder: URL, index: Int, cancel: CancelFlag,
+                        progress: (Double) -> Void) throws -> URL {
+        throw AppError("Audio transcode isn't implemented yet (“\(t.title)” → \(to.label)).")
+    }
+    /// After the mux: lag 0 ± 1 sample against the trimmed source, per-channel level within ±0.1 dB, per-channel
+    /// correlation > 0.9 (order unchanged). Returns ✓/✗ lines.
+    static func verify(final: URL, audioOrdinal: Int, source: Track, plan: TrimPlan?, to: AudioDelivery) -> [String] { [] }
 }
 
 // MARK: - Presets and the Transcode tab's model

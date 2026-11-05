@@ -371,6 +371,8 @@ struct Track: Identifiable {
     var isGroup: Bool { !members.isEmpty }
     /// Video: the picture as the file describes it (codec, bits, chroma, colour tags…) for the Transcode engine
     var source: SourceVideo? = nil
+    /// Audio: how it goes into the delivered file (COPY, or TRANSCODE → AAC / PCM 24-bit by AudioTranscode)
+    var delivery: AudioDelivery = .copy
 
     var isPCM: Bool { codecKey.hasPrefix("pcm_") }
     var canReorder: Bool { kind == .audio && isPCM && (wav != nil || isGroup) && channels >= 2 }
@@ -1768,16 +1770,67 @@ struct JobSpec {
 enum JobState { case ok, warning, failed, cancelled }
 struct JobResult { let state: JobState; let lines: [String]; let output: URL?; var inspection: InspectionData? = nil }
 
+/// Where a job is and how fast it goes (the Delivery's render page). Optional: nothing in the engine waits on it.
+struct JobProgress: Codable, Equatable {
+    enum Stage: String, Codable, CaseIterable {
+        case readMetadata, pass1, pass2, encode, injectHDR10Plus, injectDV, interleave, trim, mux, mkv, headers,
+             verifyPicture, verifyBits, sync, picture, academy, transcodeVideo, transcodeAudio, checkResult,
+             renderQC, vmaf, finalize
+        var title: String {
+            switch self {
+            case .readMetadata: return "Reading the metadata"
+            case .pass1: return "Pass 1 of 2"
+            case .pass2: return "Pass 2 of 2"
+            case .encode: return "Encoding the picture"
+            case .injectHDR10Plus: return "Injecting HDR10+"
+            case .injectDV: return "Injecting Dolby Vision"
+            case .interleave: return "Joining the mono files"
+            case .trim: return "Trimming the audio"
+            case .mux: return "Muxing"
+            case .mkv: return "Writing the MKV"
+            case .headers: return "Writing the headers"
+            case .verifyPicture: return "Verifying the picture"
+            case .verifyBits: return "Verifying bit for bit"
+            case .sync: return "Checking the sync"
+            case .picture: return "Checking the sound against the picture"
+            case .academy: return "Checking the Academy specs"
+            case .transcodeVideo: return "Transcoding the picture"
+            case .transcodeAudio: return "Transcoding the audio"
+            case .checkResult: return "Checking the result"
+            case .renderQC: return "Render QC"
+            case .vmaf: return "VMAF"
+            case .finalize: return "Finishing"
+            }
+        }
+    }
+    var stage: Stage
+    var title: String                                 // the same text onStage receives
+    var fraction: Double                              // 0…1 inside the stage
+    var frame: Int? = nil
+    var totalFrames: Int? = nil
+    var fps: Double? = nil                            // ffmpeg's fps= (cumulative); the monitor derives "now"
+    var bitrateKbps: Double? = nil                    // nil for N/A (pass 1)
+    var speed: Double? = nil
+    var outBytes: Int64? = nil
+}
+
 final class JobRunner {
     let spec: JobSpec
     let cancel = CancelFlag()
     var onStage: (String, Double) -> Void = { _, _ in }
     var onLog: (String) -> Void = { _ in }
+    // Beta 2.0.0 (nil by default; called off the main thread, never block). Wave 0: declared, not called yet.
+    var onProgress: ((JobProgress) -> Void)?
+    var onFinding: ((String) -> Void)?                // each ✓/⚠/✗ line the moment it is produced (live view only)
+    var onWorkFolder: ((URL) -> Void)?                // the .BROS-MUX-tmp folder once created
     private let lock = NSLock()
     private var mp4boxProcess: Process?
     private var encodedRPU: URL?          // the Dolby Vision metadata that went into the picture (to read it back after muxing)
 
     init(_ spec: JobSpec) { self.spec = spec }
+
+    /// The stages this job will go through, with their weight in the overall % (wave 0: none yet)
+    static func plannedStages(_ spec: JobSpec) -> [(stage: JobProgress.Stage, weight: Double)] { [] }
 
     func requestCancel() {
         cancel.set()
@@ -2303,29 +2356,88 @@ enum RunState: Equatable {
     case idle, running, done(URL?), failed, cancelled
 }
 
+/// The tabs: four workflow steps, in order, then the tools that check a file (below the divider)
 enum AppMode: String, CaseIterable, Identifiable {
-    case mux, transcode, inspect, atmos, qc
+    case video, audio, subtitles, delivery           // WORKFLOW, in order
+    case inspect, qc, atmos                           // CHECK A FILE, below the divider
     var id: String { rawValue }
     var label: String {
-        switch self { case .mux: return "Mux"; case .transcode: return "Transcode"; case .inspect: return "File Checker"; case .atmos: return "Atmos Visualizer"; case .qc: return "Render QC" }
+        switch self {
+        case .video: return "Video"
+        case .audio: return "Audio"
+        case .subtitles: return "Subtitles"
+        case .delivery: return "Delivery"
+        case .inspect: return "File Checker"
+        case .qc: return "Render QC"
+        case .atmos: return "Atmos Visualizer"
+        }
     }
     var symbol: String {
-        switch self { case .mux: return "square.stack.3d.down.forward"; case .transcode: return "arrow.triangle.2.circlepath"; case .inspect: return "checkmark.seal"; case .atmos: return "cube.transparent"; case .qc: return "checkmark.shield" }
+        switch self {
+        case .video: return "film"
+        case .audio: return "waveform"
+        case .subtitles: return "captions.bubble"
+        case .delivery: return "shippingbox"
+        case .inspect: return "checkmark.seal"
+        case .qc: return "checkmark.shield"
+        case .atmos: return "cube.transparent"
+        }
     }
+    /// 1…4 for the workflow, nil for the tools
+    var step: Int? {
+        switch self {
+        case .video: return 1
+        case .audio: return 2
+        case .subtitles: return 3
+        case .delivery: return 4
+        case .inspect, .qc, .atmos: return nil
+        }
+    }
+    var isWorkflow: Bool { step != nil }
+    static let workflow: [AppMode] = [.video, .audio, .subtitles, .delivery]
+    static let tools: [AppMode] = [.inspect, .qc, .atmos]
+}
+
+/// A stable name for an audio stream, or a group of mono streams, across re-reads of the files
+struct StreamKey: Hashable, Codable { var path: String; var streams: [Int] }
+
+/// How an audio track goes into the delivered file
+enum AudioDelivery: String, CaseIterable, Identifiable, Codable {
+    case copy, aac, pcm24
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .copy: return "COPY · bit-exact"
+        case .aac: return "TRANSCODE → AAC"
+        case .pcm24: return "TRANSCODE → PCM 24-bit"
+        }
+    }
+}
+
+/// A notice shown on one tab
+struct ProjectNotice: Identifiable, Equatable {
+    let id = UUID(); var tab: AppMode; var text: String; var level: CheckLevel
 }
 
 @Observable
 final class Project {
-    var mode: AppMode = .mux { didSet { if mode != .atmos { atmos.pause() } } }
+    var mode: AppMode = .video { didSet { if mode != .atmos { atmos.pause() } } }
     let inspector = Inspector()
     let atmos = AtmosVisualizer()
     let hdr = HDRSettings()
+    let video = VideoPlanModel()                          // the Video tab's plan (VideoModel.swift); reset in clear()
 
     var tracks: [Track] = []
     var container: Container = .mov { didSet { fixOutputExtension() } }
     var outputURL: URL?
     var loadingCount = 0
-    var notices: [String] = []
+    var notices: [ProjectNotice] = []
+    /// The answer to "Use the audio that came inside the video?" per stream (nil entry = not asked yet)
+    var embeddedAudioAnswer: [StreamKey: Bool] = [:]
+    /// Files that would replace the loaded picture: the Video tab asks "Replace the picture?"
+    var pictureReplaceRequest: [URL]? = nil
+    /// Several pictures dropped at once: the Video tab asks "One delivery per file?"
+    var batchRequest: [URL]? = nil
 
     // options
     var disableExtraAudio = false
@@ -2335,6 +2447,7 @@ final class Project {
     /// final check then follow the picture instead of that audio. Changing it moves the tracks already aligned.
     var referenceLateFrames = 0.0 {
         didSet {
+            if restoringLateFrames { return }
             let d = (referenceLateFrames - oldValue) / max(videoFPS.value, 1)
             for i in tracks.indices where tracks[i].kind == .audio && tracks[i].syncApplied {
                 tracks[i].trimStart += Int((d * tracks[i].sampleRate).rounded())
@@ -2368,6 +2481,8 @@ final class Project {
     @ObservationIgnored private var alignCancel: CancelFlag?
     @ObservationIgnored private var userChoseOutput = false
     @ObservationIgnored private var outputSource: URL?
+    @ObservationIgnored private var restoringLateFrames = false
+    @ObservationIgnored private var pendingVideoTarget: VideoPlanModel.Choice?
 
     var included: [Track] { tracks.filter(\.include) }
     var includedCount: Int { included.count }
@@ -2474,7 +2589,7 @@ final class Project {
     }
 
     func applyIMF(_ r: IMFLoad, check: Bool = true) {
-        notices += r.notices
+        r.notices.forEach { post($0, tab: .video, level: .warn) }
         guard let pkg = r.package, !r.tracks.isEmpty else { return }
         tracks.removeAll { $0.kind == .video }          // the IMF picture replaces any other video
         hdr.imf = pkg
@@ -2505,13 +2620,112 @@ final class Project {
     }
     var canRun: Bool { Tools.missing.isEmpty && outputURL != nil && includedCount > 0 && !busy }
 
+    // MARK: tabs (Beta 2.0.0): notices per tab, the picture's own audio, routing
+    // Wave 0: the simplest versions with the contract's signatures; the model owner (E1) writes the real ones.
+
+    func notices(for tab: AppMode) -> [ProjectNotice] { notices.filter { $0.tab == tab } }
+    func post(_ text: String, tab: AppMode, level: CheckLevel = .info) {
+        notices.append(ProjectNotice(tab: tab, text: text, level: level))
+    }
+
+    /// The stream's stable name: its file + stream index (a group: the members' sorted stream indexes)
+    func key(of t: Track) -> StreamKey {
+        StreamKey(path: t.url.path, streams: t.isGroup ? t.members.map(\.streamIndex).sorted() : [t.streamIndex])
+    }
+    /// The track comes from the picture's own file (by file, not by fromVideoFile)
+    func isEmbedded(_ t: Track) -> Bool { videoSource.map { t.url == $0.url } ?? false }
+    /// The first video track, included or not
+    var videoSource: Track? { tracks.first { $0.kind == .video } }
+    var embeddedAudio: [Track] { tracks.filter { $0.kind == .audio && isEmbedded($0) } }
+    var userAudio: [Track] { tracks.filter { $0.kind == .audio && !isEmbedded($0) } }
+    /// Included audio, in output order
+    var outputAudio: [Track] { tracks.filter { $0.kind == .audio && $0.include } }
+    var subtitleTracks: [Track] { tracks.filter { $0.kind == .subtitle } }
+    /// Embedded audio nobody has answered "Use it in the delivery?" for
+    var pendingAudioDecisions: [Track] { embeddedAudio.filter { embeddedAudioAnswer[key(of: $0)] == nil } }
+    /// Dolby Vision / HDR10+ loaded but the picture isn't going to HEVC HDR: the metadata would be left out
+    var metadataNotEmbedded: String? {
+        guard hdr.dvSource != nil || hdr.hdr10plusJSON != nil, video.choice(self) != .hevcHDR else { return nil }
+        let what = [hdr.dvSource != nil ? "Dolby Vision" : nil, hdr.hdr10plusJSON != nil ? "HDR10+" : nil].compactMap { $0 }.joined(separator: " and ")
+        return "The \(what) metadata won't be in the file: the picture isn't transcoded to HEVC. Transcode the picture, or remove the metadata."
+    }
+    /// The sidebar's amber badge
+    func pendingCount(for tab: AppMode) -> Int {
+        switch tab {
+        case .video: return video.decisionPending ? 1 : 0
+        case .audio: return pendingAudioDecisions.count
+        default: return 0
+        }
+    }
+    /// 0-based among outputAudio
+    func outputSlot(of id: UUID) -> Int? { outputAudio.firstIndex { $0.id == id } }
+    /// A binding to one track, for filtered lists and sheets
+    func binding(for id: UUID) -> Binding<Track>? {
+        guard let i = tracks.firstIndex(where: { $0.id == id }) else { return nil }
+        let last = tracks[i]
+        return Binding(get: { self.tracks.first(where: { $0.id == id }) ?? last },
+                       set: { v in if let j = self.tracks.firstIndex(where: { $0.id == id }) { self.tracks[j] = v } })
+    }
+    /// THE routing rule (drops, Finder opens, Add Files). Wave 0: everything still goes through add(), as before.
+    func route(_ urls: [URL]) { add(urls) }
+    /// Replaces the picture with the files in pictureReplaceRequest (wave 0: the old picture's file and alignment go)
+    func confirmReplacePicture() {
+        guard let urls = pictureReplaceRequest else { return }
+        pictureReplaceRequest = nil
+        if let old = videoSource {
+            let gone = Set(tracks.filter { $0.url == old.url }.map(\.id))     // the picture, its own audio, its timecode
+            tracks.removeAll { gone.contains($0.id) }
+        }
+        embeddedAudioAnswer = [:]
+        syncReferenceID = nil
+        for i in tracks.indices where tracks[i].kind == .audio {
+            tracks[i].trimStart = 0; tracks[i].syncApplied = false; tracks[i].syncNote = nil; tracks[i].syncLag = nil; tracks[i].syncPoints = []
+        }
+        restore(referenceLateFrames: 0)
+        alignLines = []
+        post("New picture: alignment cleared — line up again", tab: .video, level: .warn)
+        let target = pendingVideoTarget
+        pendingVideoTarget = nil
+        route(urls)
+        if let target { video.choose(target, project: self) }
+    }
+    func cancelReplacePicture() { pictureReplaceRequest = nil; pendingVideoTarget = nil }
+    /// The answer to "Use the audio that came inside the video?" (wave 0: stored, include follows, reference if none)
+    func setEmbeddedAudio(_ id: UUID, use: Bool) {
+        guard let i = tracks.firstIndex(where: { $0.id == id }) else { return }
+        embeddedAudioAnswer[key(of: tracks[i])] = use
+        tracks[i].include = use
+        if syncReferenceID == nil { syncReferenceID = id }
+    }
+    /// nil = not in the file (include = false); a taken slot swaps the two tracks
+    func moveAudio(_ id: UUID, toSlot k: Int?) {
+        guard let i = tracks.firstIndex(where: { $0.id == id }), tracks[i].kind == .audio else { return }
+        guard let k else { tracks[i].include = false; return }
+        let others = outputAudio.filter { $0.id != id }
+        tracks[i].include = true
+        if k < others.count, let j = tracks.firstIndex(where: { $0.id == others[k].id }) { tracks.swapAt(i, j) }
+    }
+    /// Why the track can't go in as it is (wave 0: never)
+    func audioConversionReason(_ t: Track) -> String? { nil }
+    /// File Checker hand-off: the file opens on the Video tab with that destination (asks first if a picture is loaded)
+    func openInVideoTab(_ url: URL, target: VideoPlanModel.Choice) {
+        if videoSource != nil { pendingVideoTarget = target; pictureReplaceRequest = [url]; return }
+        route([url])
+        video.choose(target, project: self)
+    }
+    /// Sets referenceLateFrames without moving the aligned tracks (job rebuild, replace picture)
+    func restore(referenceLateFrames f: Double) {
+        restoringLateFrames = true
+        referenceLateFrames = f
+        restoringLateFrames = false
+    }
+
     // MARK: files
 
     func add(_ urls: [URL]) {
         if mode == .inspect, let u = urls.first { inspector.load(u); return }
         if mode == .atmos, let u = urls.first { atmos.load(u); return }
         if mode == .qc, let u = urls.first { RenderQCModel.shared.open(u); return }
-        if mode == .transcode { TranscodeModel.shared.add(urls); return }
         guard !busy else { return }
         // IMF packages (a folder with an ASSETMAP, or its CPL) are read as one picture
         let imfs = urls.filter { IMF.packageFolder(for: $0) != nil }
@@ -2547,7 +2761,7 @@ final class Project {
             for f in files {
                 let r = Probe.tracks(for: f)
                 DispatchQueue.main.async {
-                    if let e = r.error { self.notices.append(e) }
+                    if let e = r.error { self.post(e, tab: .audio, level: .warn) }
                     self.insert(r.tracks)
                 }
             }
@@ -2599,7 +2813,7 @@ final class Project {
         syncReferenceID = ref.id
         if let i = tracks.firstIndex(where: { $0.id == ref.id }), tracks[i].include {
             tracks[i].include = false
-            notices.append("The video's own audio (“\(ref.title)”) is now the sync reference and won't be in the output. Check its box if you want to include it.")
+            post("The video's own audio (“\(ref.title)”) is now the sync reference and won't be in the output. Check its box if you want to include it.", tab: .audio, level: .warn)
         }
     }
 
@@ -2621,7 +2835,9 @@ final class Project {
     func autoGroup() {
         for set in Self.groupSets(groupCandidates) { makeGroup(set.map(\.id)) }
     }
-    func makeGroup(_ ids: [UUID]) {
+    func makeGroup(_ ids: [UUID]) { makeGroup(ids, listen: true) }
+    /// listen: false = no background ChannelID (a job being rebuilt sets the roles itself)
+    func makeGroup(_ ids: [UUID], listen shouldListen: Bool) {
         let members = ids.compactMap { id in tracks.first { $0.id == id } }
         guard members.count >= 2, var g = Track.group(members) else { return }
         let pos = tracks.firstIndex { $0.id == members[0].id } ?? tracks.count
@@ -2633,10 +2849,10 @@ final class Project {
         tracks.insert(g, at: min(pos, tracks.count))
         let what = g.fromVideoFile ? "mono streams of \(g.url.lastPathComponent)" : "mono files"
         if let roles = g.channelRoles {
-            notices.append("\(members.count) \(what) are one \(Probe.channelText(g.channels, nil)) track: \(ChannelOrder(roles: roles).text) (\(g.rolesSource ?? "")). “Channels…” on the track changes or ungroups them.")
+            post("\(members.count) \(what) are one \(Probe.channelText(g.channels, nil)) track: \(ChannelOrder(roles: roles).text) (\(g.rolesSource ?? "")). “Channels…” on the track changes or ungroups them.", tab: .audio, level: .warn)
         } else {
-            notices.append("\(members.count) \(what) are one \(Probe.channelText(g.channels, nil)) track; which is which isn't in the files or their names, so the app is listening to them. “Channels…” on the track changes or ungroups them.")
-            listen(to: g.id)
+            post("\(members.count) \(what) are one \(Probe.channelText(g.channels, nil)) track; which is which isn't in the files or their names, so the app is listening to them. “Channels…” on the track changes or ungroups them.", tab: .audio, level: .warn)
+            if shouldListen { listen(to: g.id) }
         }
     }
     func ungroup(_ id: UUID) {
@@ -2695,17 +2911,19 @@ final class Project {
         tracks.removeAll(); outputURL = nil; state = .idle; log = ""; notices = []; resultLines = []; alignLines = []
         referenceLateFrames = 0          // a correction measured on one film must not follow into the next
         resultInspection = nil; userChoseOutput = false; outputSource = nil; syncReferenceID = nil
+        embeddedAudioAnswer = [:]; pictureReplaceRequest = nil; batchRequest = nil; pendingVideoTarget = nil
         hdr.reset()
+        video.reset()
     }
 
     func openPanel() {
         let p = NSOpenPanel()
-        p.allowsMultipleSelection = mode == .mux || mode == .transcode
-        p.canChooseDirectories = mode == .mux || mode == .transcode
+        p.allowsMultipleSelection = mode.isWorkflow
+        p.canChooseDirectories = mode.isWorkflow
         p.canChooseFiles = true
-        p.message = mode == .mux ? "Choose the video, audio and subtitle files (or an IMF package folder)" : mode == .transcode ? "Choose the files to transcode (a new file is written for each; the originals are never touched)" : mode == .inspect ? "Choose the file to inspect" : mode == .qc ? "Choose the rendered file to check" : "Choose a Dolby Atmos (E-AC-3 JOC) file"
-        p.prompt = mode == .mux || mode == .transcode ? "Add" : mode == .inspect ? "Inspect" : mode == .qc ? "Check" : "Visualize"
-        if p.runModal() == .OK { add(p.urls) }
+        p.message = mode.isWorkflow ? "Choose the video, audio and subtitle files (or an IMF package folder)" : mode == .inspect ? "Choose the file to inspect" : mode == .qc ? "Choose the rendered file to check" : "Choose a Dolby Atmos (E-AC-3 JOC) file"
+        p.prompt = mode.isWorkflow ? "Add" : mode == .inspect ? "Inspect" : mode == .qc ? "Check" : "Visualize"
+        if p.runModal() == .OK { route(p.urls) }
     }
 
     func chooseOutput() {
@@ -3126,7 +3344,7 @@ struct BrosMuxApp: App {
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Add Files…") { project.openPanel() }.keyboardShortcut("o").disabled(project.mode == .mux && project.busy)
+                Button("Add Files…") { project.openPanel() }.keyboardShortcut("o").disabled(project.mode.isWorkflow && project.busy)
                 Button("Clear All") { project.clear() }.keyboardShortcut("n").disabled(project.busy)
             }
         }
@@ -3136,7 +3354,7 @@ struct BrosMuxApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var project: Project?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-    func application(_ application: NSApplication, open urls: [URL]) { project?.add(urls) }
+    func application(_ application: NSApplication, open urls: [URL]) { project?.route(urls) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let p = project, p.state == .running || p.aligning else { return .terminateNow }
         let a = NSAlert()
@@ -3520,9 +3738,13 @@ func snapshot(_ args: [String]) {
         size = NSSize(width: 1320, height: 1040)
         root = AnyView(PictureSyncSheet(model: m, standalone: true))
     } else if let f = value("--transcode") {
-        // Transcode tab with a file in the queue: --snapshot --transcode FILE [--to prores422hq|h264|hevc|hevcdv] -o screen.png
+        // The Video tab with FILE and a transcode destination (the old Transcode tab): --snapshot --transcode FILE
+        // [--to prores422hq|h264|hevc|hevcdv] -o screen.png. The plan rows below still come from the old model (wave 0).
         project = Project()
-        project.mode = .transcode
+        project.mode = .video
+        let toPreset = value("--to").flatMap(TranscodePreset.named) ?? .prores422HQ
+        project.openInVideoTab(URL(fileURLWithPath: f), target: toPreset == .hevcDolbyVision ? .hevcHDR
+                               : .transcode(VideoTranscodeSettings(preset: toPreset == .custom ? TranscodePreset.prores422HQ.rawValue : toPreset.rawValue)))
         let m = TranscodeModel.shared
         m.clear()
         if let p = value("--to").flatMap(TranscodePreset.named) { m.preset = p }
@@ -3551,7 +3773,10 @@ func snapshot(_ args: [String]) {
     } else {
         project = buildProject(a, output: a.dest)
         if quality { size = NSSize(width: 900, height: 760); chrome = false }
-        root = quality ? AnyView(QualitySheet().environment(project)) : AnyView(ContentView().environment(project))
+        root = quality ? AnyView(AudioOptionsView().environment(project)) : AnyView(ContentView().environment(project))
+    }
+    if let t = value("--tab") {             // --tab video|audio|subtitles|delivery|inspect|qc|atmos
+        if let m = AppMode(rawValue: t.lowercased()) { project.mode = m } else { print("--tab: unknown tab “\(t)” (\(AppMode.allCases.map(\.rawValue).joined(separator: " ")))") }
     }
     if chrome && args.contains("--wide") { size = NSSize(width: 1900, height: 1000) }
     // a sheet drawn alone needs the window colour behind it (the window provides it in the app)
@@ -3642,6 +3867,7 @@ enum Entry {
         let args = Array(CommandLine.arguments.dropFirst())
         switch args.first {
         case "--job": exit(runJobCLI(Array(args.dropFirst())))
+        case "--job-file": exit(DeliveryCLI.run(Array(args.dropFirst())))
         case "--report": exit(runReportCLI(Array(args.dropFirst())))
         case "--snapshot": snapshot(Array(args.dropFirst()))
         case "--picture": exit(pictureCLI(Array(args.dropFirst())))
