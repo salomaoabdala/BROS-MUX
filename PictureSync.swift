@@ -642,7 +642,7 @@ struct PictureSyncSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Picture Sync Check", subtitle: model.picture.lastPathComponent) {
+            AudioSheetHeader(title: "Picture Sync Check", subtitle: model.picture.lastPathComponent) {
                 if !model.isOutput, model.targets.count > 1 {
                     Picker("", selection: Binding(get: { model.targetID }, set: { model.targetID = $0; model.refreshTarget() })) {
                         ForEach(model.targets) { t in
@@ -652,69 +652,75 @@ struct PictureSyncSheet: View {
                     .headerPickerStyle(count: model.targets.count).labelsHidden().frame(maxWidth: 420).disabled(model.measuring)
                 }
                 if model.measuring {
-                    ProgressView(value: model.progress).frame(width: 160)
-                    Text(model.stage).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Button("Stop") { model.cancel() }
+                    ProgressView(value: model.progress).tint(Cryo.ice).frame(width: 160)
+                    Text(model.stage).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).lineLimit(1)
+                    Button("Stop") { model.cancel() }.buttonStyle(CryoButtonStyle())
                 } else {
-                    Button(model.hasMeasurement ? "Measure Again" : "Measure") { model.measure() }.buttonStyle(.borderedProminent)
+                    Button(model.hasMeasurement ? "Measure Again" : "Measure") { model.measure() }.buttonStyle(CryoGoButtonStyle(.primary))
                 }
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: DS.gap) {
+                VStack(alignment: .leading, spacing: 14) {
                     Text("This checks the sound against the picture itself, not against another audio track: hard cuts in the image are found in 30 windows of 30 s spread over the body of the film (5%–80%: studio logos, title cards and end credits are left out, they are often out of sync on their own), the changes of sound are found under them, and the offset at which the sound changes land on the cuts is measured to the millisecond. Below, the frames around one cut with the waveform under them — press Play to loop that moment and judge it by ear.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4)
-                    HStack(alignment: .top, spacing: DS.gap) {
-                        GroupBox { playerCard }.groupBoxStyle(.inset).frame(width: 628)
-                        GroupBox("Measured against the picture") { verdictCard }.groupBoxStyle(.inset).frame(maxWidth: .infinity)
+                        .font(CryoFont.body(11)).foregroundStyle(Cryo.ink3).fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4)
+                    HStack(alignment: .top, spacing: 14) {
+                        AudioCard(padding: 14) { playerCard }.frame(width: 628)
+                        AudioCard(padding: 14) {
+                            Text("MEASURED AGAINST THE PICTURE").font(CryoFont.label(11)).tracking(1.4).foregroundStyle(Cryo.ink2)
+                            verdictCard
+                        }
+                        .frame(maxWidth: .infinity)
                     }
-                    GroupBox { momentCard }.groupBoxStyle(.inset)
+                    AudioCard(padding: 14) { momentCard }
                 }
-                .padding(.horizontal, 20).padding(.vertical, 8)
+                .padding(.horizontal, 22).padding(.vertical, 8)
             }
             if !standalone {
-                SheetButtons {
-                    Button("Done") { model.stopPlayer(); dismiss() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                AudioSheetFooter {
+                    Button("Done") { model.stopPlayer(); dismiss() }.keyboardShortcut(.defaultAction).buttonStyle(CryoGoButtonStyle(.primary))
                 }
             }
         }
         .frame(width: DS.sheet(1280, standalone ? 1060 : 980).width, height: DS.sheet(1280, standalone ? 1060 : 980).height)
+        .background(AudioLook.sheet.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)
         .onAppear { if !standalone && !model.hasMeasurement { model.measure() } }
         .onDisappear { model.stopPlayer() }
     }
 
     var verdictCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if model.lanes.isEmpty { Text("No audio to check.").foregroundStyle(.secondary) }
+        VStack(alignment: .leading, spacing: 10) {
+            if model.lanes.isEmpty { Text("No audio to check.").font(CryoFont.body(12)).foregroundStyle(Cryo.ink2) }
             ForEach(model.lanes) { lane in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(lane.label).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(lane.label).font(CryoFont.mono(11).weight(.semibold))
+                        .foregroundStyle(lane.label.hasPrefix("REFERENCE") ? Cryo.ice : AudioLook.lilac).lineLimit(2)
                     if let r = lane.result {
                         let ms = (r.offset ?? 0) * 1000
                         let ok = r.offset != nil && r.confident && ms >= -15 && ms <= 45
-                        Label {
-                            Text(r.message).fixedSize(horizontal: false, vertical: true)
-                        } icon: {
-                            Image(systemName: r.offset == nil ? "questionmark.circle" : ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .foregroundStyle(r.offset == nil ? Color.secondary : ok ? Color.green : Color.orange)
+                        if r.offset == nil {
+                            AudioStatusLine(level: .info, text: r.message, symbol: "questionmark.circle", size: 12)
+                        } else {
+                            AudioStatusLine(level: ok ? .ok : .warn, text: r.message, size: 12)
                         }
                     } else {
-                        Text(model.measuring ? "Measuring…" : "Not measured yet.").foregroundStyle(.secondary)
+                        Text(model.measuring ? "Measuring…" : "Not measured yet.").font(CryoFont.body(12)).foregroundStyle(Cryo.ink2)
                     }
                 }
             }
             if let f = model.suggestedFrames, let o = model.suggestedLag {
                 VStack(alignment: .leading, spacing: 4) {
                     Button(String(format: "Use %d frame%@ (%+.1f ms) in the Sync section", f, abs(f) == 1 ? "" : "s", o * 1000)) { model.applySuggestion() }
-                        .buttonStyle(.borderedProminent).tint(.orange)
-                    Text("Sets “The reference is N frames late vs its picture” and moves every trim.").font(.caption).foregroundStyle(.secondary)
+                        .buttonStyle(CryoGoButtonStyle(.amber))
+                    Text("Sets “The reference is N frames late vs its picture” and moves every trim.").font(CryoFont.body(11)).foregroundStyle(Cryo.ink3)
                 }
             } else if !model.isOutput, model.referenceLane?.result?.offset != nil {
-                Label("The Sync section already has this value (\(Int(model.project.referenceLateFrames)) frame\(abs(model.project.referenceLateFrames) == 1 ? "" : "s")).", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary)
+                AudioStatusLine(level: .info, text: "The Sync section already has this value (\(Int(model.project.referenceLateFrames)) frame\(abs(model.project.referenceLateFrames) == 1 ? "" : "s")).", symbol: "checkmark", size: 11)
             }
             if let r = model.shownResult, !r.curve.isEmpty {
                 if r.groups.count > 1 {
                     HStack(spacing: 8) {
-                        Text("Groups of cuts").font(.caption).foregroundStyle(.secondary)
+                        CryoFieldLabel("Groups of cuts")
                         Picker("", selection: Binding(get: { min(model.selectedGroup, r.groups.count - 1) }, set: { model.selectGroup($0) })) {
                             ForEach(Array(r.groups.prefix(4).enumerated()), id: \.offset) { i, g in
                                 Text(String(format: "%+.0f ms · %d cuts / %d win", g.lag * 1000, g.count, g.windows)).tag(i)
@@ -723,72 +729,82 @@ struct PictureSyncSheet: View {
                         .pickerStyle(.segmented).labelsHidden()
                     }
                     Text("The first group is the answer; the others are cuts whose sound sits elsewhere (archive footage with its own sync, music montages). Pick one to see its cuts below.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .font(CryoFont.body(11)).foregroundStyle(Cryo.ink3).fixedSize(horizontal: false, vertical: true)
                 }
                 LagChart(result: r, fps: model.fps).frame(height: 110)
+                    .padding(8)
+                    .background(AudioLook.scope, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(AudioLook.scopeRing, lineWidth: 1))
                 Text("Where the sound hits land relative to the picture cuts, over all cuts found (0 = on the cut, + = after it). A single sharp peak means the sound follows the cuts at one fixed offset.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(CryoFont.body(11)).foregroundStyle(Cryo.ink3).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
     var playerCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack {      // neutral surround: black ground and a grey ring around the picture, nothing over it
+                Rectangle().fill(Color.black)
                 if let p = model.player, !standalone {
-                    VideoPlayer(player: p).frame(height: 338)
+                    VideoPlayer(player: p)
                 } else {
-                    Rectangle().fill(Color.black).frame(height: 338)
                     Text(model.playerNote.isEmpty ? (model.cut == nil ? "Measure first — the check points come from the measurement." : "Preparing the preview…") : model.playerNote)
-                        .font(.caption).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center).padding()
+                        .font(CryoFont.body(11.5)).foregroundStyle(Color(white: 0.75)).multilineTextAlignment(.center).padding()
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .frame(height: 338)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(AudioLook.imageRing, lineWidth: 1))
             HStack(spacing: 8) {
-                Button { model.togglePlay() } label: { Image(systemName: model.playing ? "pause.fill" : "play.fill") }
-                    .disabled(model.player == nil).keyboardShortcut(.space, modifiers: [])
-                Button { model.step(-1) } label: { Image(systemName: "backward.frame.fill") }.help("One frame back").disabled(model.player == nil)
-                Button { model.step(1) } label: { Image(systemName: "forward.frame.fill") }.help("One frame forward").disabled(model.player == nil)
-                Toggle("½× speed", isOn: Binding(get: { model.slow }, set: { model.setSlow($0) })).toggleStyle(.checkbox)
+                Group {
+                    Button { model.togglePlay() } label: { Image(systemName: model.playing ? "pause.fill" : "play.fill") }
+                        .disabled(model.player == nil).keyboardShortcut(.space, modifiers: [])
+                    Button { model.step(-1) } label: { Image(systemName: "backward.frame.fill") }.help("One frame back").disabled(model.player == nil)
+                    Button { model.step(1) } label: { Image(systemName: "forward.frame.fill") }.help("One frame forward").disabled(model.player == nil)
+                }
+                .buttonStyle(CryoButtonStyle())
+                Toggle(isOn: Binding(get: { model.slow }, set: { model.setSlow($0) })) { Text("½× speed").font(CryoFont.body(12)).foregroundStyle(Cryo.ink2) }
+                    .toggleStyle(CryoToggleStyle()).fixedSize()
                 Spacer()
                 if let ms = model.playheadMs {
-                    Text(String(format: "%+.0f ms · %+.1f fr", ms, ms / 1000 * model.fps)).font(.system(.callout, design: .monospaced))
-                        .foregroundStyle(abs(ms) < 1000 / model.fps / 2 ? Color.red : Color.primary)
-                        .help("Player position relative to the cut")
+                    let onCut = abs(ms) < 1000 / model.fps / 2
+                    Text(String(format: "%+.0f ms · %+.1f fr", ms, ms / 1000 * model.fps)).font(CryoFont.mono(12.5))
+                        .foregroundStyle(onCut ? Color.black : Cryo.ink)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(onCut ? Color.white : Color.clear))
+                        .help("Player position relative to the cut (white on the cut frame)")
                 }
             }
             HStack(spacing: 8) {
-                Text("Sound").foregroundStyle(.secondary)
-                Picker("", selection: Binding(get: { model.playLane }, set: { model.playLane = $0; model.selectedGroup = 0; model.points = model.groupPoints(); model.selected = 0; model.showPoint() })) {
-                    ForEach(Array(model.lanes.enumerated()), id: \.offset) { i, l in Text(shortLabel(l.label)).tag(i) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
+                CryoFieldLabel("Sound")
+                CryoSegmented(selection: Binding(get: { model.playLane }, set: { model.playLane = $0; model.selectedGroup = 0; model.points = model.groupPoints(); model.selected = 0; model.showPoint() }),
+                              options: Array(model.lanes.enumerated()).map { (value: $0.offset, label: shortLabel($0.element.label)) })
                 if !model.isOutput {
-                    Picker("", selection: Binding(get: { model.after }, set: { model.after = $0; model.refreshTarget() })) {
-                        Text("After alignment").tag(true); Text("Before").tag(false)
-                    }
-                    .pickerStyle(.segmented).labelsHidden().frame(width: 200).disabled(model.measuring)
+                    CryoSegmented(selection: Binding(get: { model.after }, set: { model.after = $0; model.refreshTarget() }),
+                                  options: [(true, "After alignment"), (false, "Before")])
+                        .frame(width: 200).disabled(model.measuring)
                 }
             }
-            Text("Loops 1 s before to 1 s after the cut. The frame counter turns red on the cut frame; the sound should hit when the picture changes.")
-                .font(.caption).foregroundStyle(.secondary)
+            Text("Loops 1 s before to 1 s after the cut. The frame counter turns white on the cut frame; the sound should hit when the picture changes.")
+                .font(CryoFont.body(11)).foregroundStyle(Cryo.ink3)
         }
     }
 
     func shortLabel(_ s: String) -> String { s.hasPrefix("REFERENCE") ? "Reference" : String(s.split(separator: "·").first ?? Substring(s)).trimmingCharacters(in: .whitespaces) }
 
     var momentCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Text(model.cut.map { "Cut at \(Fmt.duration($0)) — frames −\(PictureSyncModel.frameSpan)…+\(PictureSyncModel.frameSpan - 1) and the sound under them" } ?? "Frames around a cut").font(.headline)
+                Text(model.cut.map { "Cut at \(Fmt.duration($0)) — frames −\(PictureSyncModel.frameSpan)…+\(PictureSyncModel.frameSpan - 1) and the sound under them" } ?? "Frames around a cut")
+                    .font(CryoFont.body(13.5).weight(.semibold)).foregroundStyle(Cryo.ink)
                 Spacer()
                 if model.loadingView { ProgressView().controlSize(.small) }
-                Text("Check points").font(.caption).foregroundStyle(.secondary)
+                CryoFieldLabel("Check points")
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(Array(model.points.enumerated()), id: \.offset) { i, h in
                             Button("\(i + 1) · \(Fmt.duration(h.cut).dropLast(4))") { model.select(i) }
-                                .buttonStyle(.bordered).controlSize(.small).tint(i == model.selected ? Color.accentColor : nil)
+                                .buttonStyle(CryoButtonStyle(tint: i == model.selected ? Cryo.ice : nil))
                                 .help(String(format: "hit %.0f dB, %+.0f ms from the cut", h.rise, (h.onset - h.cut) * 1000))
                         }
                     }
@@ -800,26 +816,30 @@ struct PictureSyncSheet: View {
                 HStack(spacing: 0) {
                     ForEach(0..<(PictureSyncModel.frameSpan * 2), id: \.self) { i in
                         ZStack(alignment: .topLeading) {
+                            Rectangle().fill(Color.black)
                             if i < model.thumbs.count { Image(decorative: model.thumbs[i], scale: 1).resizable().aspectRatio(16 / 9, contentMode: .fit) }
-                            else { Rectangle().fill(Color.black.opacity(0.6)) }
+                            let onCut = i == PictureSyncModel.frameSpan
                             Text(i - PictureSyncModel.frameSpan >= 0 ? "+\(i - PictureSyncModel.frameSpan)" : "\(i - PictureSyncModel.frameSpan)")
-                                .font(.system(.caption2, design: .monospaced)).foregroundColor(.white).padding(3)
-                                .background(i == PictureSyncModel.frameSpan ? Color.red.opacity(0.85) : Color.black.opacity(0.5)).padding(3)
+                                .font(CryoFont.mono(10)).foregroundColor(onCut ? .black : Color(white: 0.85)).padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(RoundedRectangle(cornerRadius: 3).fill(onCut ? Color.white : Color.black.opacity(0.65))).padding(4)
                         }
                         .frame(width: w)
-                        .overlay(alignment: .leading) { if i == PictureSyncModel.frameSpan { Rectangle().fill(Color.red).frame(width: 2) } }
+                        .overlay(alignment: .leading) { if i == PictureSyncModel.frameSpan { Rectangle().fill(Color.white).frame(width: 2) } }
                     }
                 }
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AudioLook.imageRing, lineWidth: 1))
             }
             .frame(height: 1200 / CGFloat(PictureSyncModel.frameSpan * 2) * 9 / 16)
             WaveLanes(ref: model.refEnv, cand: model.candEnv, overlay: false, halfWidth: model.halfWidth, fps: model.fps,
                       refLabel: model.lanes.first?.label ?? "", candLabel: model.lanes.count > 1 ? model.lanes[1].label : "",
                       marker: markerFor(model.lanes.count > 1 ? model.lanes[1] : nil), markerLabel: markerLabel)
                 .frame(height: 230)
-                .background(DS.scope, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            Text("The red line is the cut: the first frame of the new shot starts there. A sound that belongs to the cut should start on that line. Each grid column is one frame.")
-                .font(.caption).foregroundStyle(.secondary)
+                .background(AudioLook.scope, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(AudioLook.scopeRing, lineWidth: 1))
+            Text("The white line is the cut: the first frame of the new shot starts there. A sound that belongs to the cut should start on that line. Each grid column is one frame.")
+                .font(CryoFont.body(11)).foregroundStyle(Cryo.ink3)
         }
     }
 
@@ -844,7 +864,8 @@ struct LagChart: View {
             // frame grid
             var f = -(range * fps).rounded(.down) / fps
             while f <= range {
-                ctx.stroke(Path { $0.move(to: CGPoint(x: x(f), y: 0)); $0.addLine(to: CGPoint(x: x(f), y: plotH)) }, with: .color(.secondary.opacity(abs(f) < 1e-9 ? 0.7 : 0.15)), lineWidth: abs(f) < 1e-9 ? 1.5 : 1)
+                ctx.stroke(Path { $0.move(to: CGPoint(x: x(f), y: 0)); $0.addLine(to: CGPoint(x: x(f), y: plotH)) },
+                           with: .color(.white.opacity(abs(f) < 1e-9 ? 0.6 : 0.08)), lineWidth: abs(f) < 1e-9 ? 1.5 : 1)
                 f += 1 / fps
             }
             var p = Path()
@@ -852,14 +873,14 @@ struct LagChart: View {
                 let pt = CGPoint(x: CGFloat(i) / CGFloat(c.count - 1) * size.width, y: plotH - CGFloat(v / mx) * (plotH - 4))
                 if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
             }
-            ctx.stroke(p, with: .color(Color.accentColor), lineWidth: 1.5)
+            ctx.stroke(p, with: .color(Cryo.ice), lineWidth: 1.5)
             if let o = result.offset {
-                ctx.stroke(Path { $0.move(to: CGPoint(x: x(o), y: 0)); $0.addLine(to: CGPoint(x: x(o), y: plotH)) }, with: .color(.orange), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                ctx.draw(Text(String(format: "%+.1f ms", o * 1000)).font(.caption2.weight(.semibold)).foregroundColor(.orange),
+                ctx.stroke(Path { $0.move(to: CGPoint(x: x(o), y: 0)); $0.addLine(to: CGPoint(x: x(o), y: plotH)) }, with: .color(Cryo.attention), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                ctx.draw(Text(String(format: "%+.1f ms", o * 1000)).font(CryoFont.mono(10).weight(.semibold)).foregroundColor(Cryo.attention),
                          at: CGPoint(x: x(o) + (o > 0.15 ? -4 : 4), y: 2), anchor: o > 0.15 ? .topTrailing : .topLeading)
             }
             for (s, label) in [(-range, String(format: "−%.0f ms", range * 1000)), (0.0, "cut"), (range, String(format: "+%.0f ms", range * 1000))] {
-                ctx.draw(Text(label).font(.system(.caption2, design: .monospaced)).foregroundColor(.secondary),
+                ctx.draw(Text(label).font(CryoFont.mono(10)).foregroundColor(Cryo.ink3),
                          at: CGPoint(x: s < 0 ? 0 : s > 0 ? size.width : x(0), y: size.height), anchor: s < 0 ? .bottomLeading : s > 0 ? .bottomTrailing : .bottom)
             }
         }
