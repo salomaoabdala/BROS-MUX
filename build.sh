@@ -7,8 +7,8 @@
 # LSRequiresNativeExecution, so Launch Services refuses to translate the app even if "Open using Rosetta" is ticked.
 set -e
 cd "$(dirname "$0")"
-VERSION=2.0.0                    # keep in step with AppInfo.version in Design.swift
-LABEL="Beta 2.0.0"               # the working version's name (AppInfo.label); a beta installs beside the stable app
+VERSION=2.0.1                    # keep in step with AppInfo.version in Design.swift
+LABEL="Beta 2.0.1"               # the working version's name (AppInfo.label); a beta installs beside the stable app
 NAME="BROS-MUX $LABEL"
 APP=build.noindex/BROS-MUX.app   # .noindex: Spotlight skips it, so only /Applications shows up in search
 ARCH=arm64

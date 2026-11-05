@@ -184,8 +184,12 @@ enum AudioFacts {
         case .copy: return "\(codecShort(t)) \(layout(t)) · copied bit for bit"
         case .aac: return "AAC \(layout(t)) · \(aacKbps(t.channels)) Kbps"
         case .pcm24: return "PCM 24-bit \(layout(t))"
+        case .ddpAtmos, .trueHDAtmos: return DolbyEncode.target(d)
         }
     }
+
+    /// The Dolby encode that fits the chosen container: DD+ Atmos plays everywhere, TrueHD Atmos only from an MKV
+    static func dolbyFit(_ p: Project) -> AudioDelivery { p.container == .mkv ? .trueHDAtmos : .ddpAtmos }
 
     /// Why this track can't be delivered as `d` (nil = it can). The engine's rule first, then the rules any owner can see.
     static func deliveryProblem(_ t: Track, _ d: AudioDelivery) -> String? {
@@ -512,6 +516,9 @@ struct AudioDeliveryChip: View {
     let track: Track
     var body: some View {
         if track.delivery == .copy { CryoChip("COPY", style: .lit).help("Copied bit for bit") }
+        else if track.delivery.isDolbyEncode {
+            CryoChip(track.delivery == .ddpAtmos ? "DOLBY → DD+ ATMOS" : "DOLBY → TRUEHD ATMOS", style: .amber).help(track.delivery.label + " · made by Dolby Media Encoder")
+        }
         else { CryoChip(track.delivery == .aac ? "TRANSCODE → AAC" : "TRANSCODE → PCM 24", style: .amber).help(track.delivery.label) }
     }
 }
@@ -540,8 +547,11 @@ struct AudioTranscodeBanner: View {
     @Environment(Project.self) private var project
     let track: Track
     var body: some View {
+        if track.delivery.isDolbyEncode { AudioDolbyBanner(track: track) } else { transcode }
+    }
+    var transcode: some View {
         let why = project.audioConversionReason(track).map { "you chose it because \($0)" } ?? "you chose it in the inspector"
-        HStack(alignment: .top, spacing: 10) {
+        return HStack(alignment: .top, spacing: 10) {
             Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 13, weight: .semibold)).foregroundStyle(Cryo.attention).padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -557,6 +567,83 @@ struct AudioTranscodeBanner: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(AudioLook.attention))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Cryo.attention.opacity(0.5), lineWidth: 1))
+    }
+}
+
+/// Beta 2.0.1: the amber announcement of a Dolby encode — the master → the Dolby stream, who makes it (Dolby Media
+/// Encoder, and whether its licence is there), what changes and what is checked; a TrueHD outside an MKV says so with the fix
+struct AudioDolbyBanner: View {
+    @Environment(Project.self) private var project
+    let track: Track
+    var body: some View {
+        let status = DolbyStatus.shared.state
+        let wrongContainer = track.delivery == .trueHDAtmos && project.container != .mkv
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "waveform.badge.plus").font(.system(size: 13, weight: .semibold)).foregroundStyle(Cryo.attention).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("DOLBY ENCODE").font(CryoFont.label(11)).tracking(1.4).foregroundStyle(Cryo.attention)
+                    Text("ADM master \(track.channels) ch → \(DolbyEncode.target(track.delivery))")
+                        .font(CryoFont.mono(11.5)).foregroundStyle(Cryo.ink).lineLimit(1).truncationMode(.middle)
+                }
+                Text("You chose it. Dolby Media Encoder renders the master's beds and objects into Dolby Atmos"
+                     + (track.delivery == .trueHDAtmos ? " (16 elements, lossless) with a 7.1 core" : " (E-AC-3 JOC) with a 5.1 core")
+                     + " for players without Atmos. The loudness is only measured, never changed; the master is only read. Codec, Atmos and length are checked, and the sync is measured against the reference after the mux.")
+                    .font(CryoFont.body(11.5)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
+                switch status {
+                case .ready(let s): AudioStatusLine(level: .ok, text: s, size: 11.5)
+                case .notInstalled: AudioStatusLine(level: .fail, text: DolbyEncode.notInstalledText, size: 11.5)
+                case .notReady(let s): AudioStatusLine(level: .fail, text: s, size: 11.5)
+                case .checking: AudioStatusLine(level: .info, text: "Asking \(DolbyEncode.name) for its licence…", symbol: "hourglass", size: 11.5)
+                case .closed, .unknown:
+                    HStack(spacing: 8) {
+                        AudioStatusLine(level: .info, text: "\(DolbyEncode.name) is closed: BROS-MUX opens it in the background for the encode.", size: 11.5)
+                        Button("Check the licence now") { DolbyStatus.shared.refresh(open: true) }.buttonStyle(CryoButtonStyle())
+                    }
+                }
+                if wrongContainer {
+                    HStack(spacing: 8) {
+                        AudioStatusLine(level: .fail, text: "TrueHD Atmos goes in MKV only — MOV and MP4 players don't play TrueHD.", size: 11.5)
+                        Button("Change the container to MKV") { project.container = .mkv }.buttonStyle(CryoGoButtonStyle(.amber))
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(AudioLook.attention))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Cryo.attention.opacity(0.5), lineWidth: 1))
+        .onAppear { if case .unknown = status { DolbyStatus.shared.refresh() } }
+    }
+}
+
+/// Beta 2.0.1: an Atmos master (ADM BWF) that isn't Dolby-encoded yet — what it is, and the encode that makes it playable
+struct AudioADMCard: View {
+    @Environment(Project.self) private var project
+    let track: Track
+    var body: some View {
+        let fit = AudioFacts.dolbyFit(project)
+        let other: AudioDelivery = fit == .ddpAtmos ? .trueHDAtmos : .ddpAtmos
+        let installed = DolbyEncode.appURL != nil
+        var actions: [CryoAlertCard.Action] = []
+        if installed {
+            actions.append(.init("Encode → \(short(fit))", role: .primary) { encode(fit) })
+            actions.append(.init("Encode → \(short(other))" + (other == .trueHDAtmos ? " (MKV)" : ""), role: .secondary) { encode(other) })
+        }
+        actions.append(.init(track.include ? "Keep" : "Only for sync") { AudioTabState.shared.keptAsIs.insert(track.id) })
+        let recommendation = installed
+            ? "Encode it here with Dolby Media Encoder: DD+ Atmos (E-AC-3 JOC, \(DolbyEncode.ddpKbps) Kbps) plays on Apple TV, TVs and in MOV/MP4 — it's what the Academy asks for; TrueHD Atmos is lossless, for an MKV home-theater file. The master is only read."
+            : DolbyEncode.notInstalledText
+        return CryoAlertCard(title: "This is a Dolby Atmos master", subtitle: "\(track.title) · ADM BWF · \(track.channels) channels",
+                             detected: "Beds and objects for the Dolby renderer: no player plays it as it is" + (track.include ? "" : " — today it only lines the other tracks up"),
+                             recommendation: recommendation, actions: actions)
+    }
+    func short(_ d: AudioDelivery) -> String { d == .trueHDAtmos ? "TrueHD Atmos" : "DD+ Atmos" }
+    func encode(_ d: AudioDelivery) {
+        if d == .trueHDAtmos && project.container != .mkv { project.container = .mkv }
+        if !track.include { AudioActions.place(project, track.id, slot: project.outputAudio.count) }
+        if let i = project.tracks.firstIndex(where: { $0.id == track.id }) { project.tracks[i].delivery = d }
+        DolbyStatus.shared.refresh(open: true)
     }
 }
 
@@ -704,7 +791,9 @@ struct AudioUserRow: View {
                     .buttonStyle(.plain).disabled(project.busy).help("Remove from the list (the file itself is never touched)")
                 }
                 if track.include && track.delivery != .copy { AudioTranscodeBanner(track: track) }
-                if let reason, track.delivery == .copy {
+                if track.isADMMaster && track.delivery == .copy && !ui.keptAsIs.contains(track.id) {
+                    AudioADMCard(track: track)          // Beta 2.0.1: in the file or not, the encode that makes it playable
+                } else if let reason, track.delivery == .copy {
                     if ui.keptAsIs.contains(track.id) {
                         HStack(spacing: 8) {
                             AudioStatusLine(level: .warn, text: "Kept as it is: \(reason). The Delivery checks it again before it starts.")
@@ -973,10 +1062,13 @@ struct AudioTrackDetails: View {
                     .font(CryoFont.body(12)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
             } else {
             AudioCard {
-                ForEach(AudioDelivery.allCases) { d in
+                ForEach(AudioDelivery.options(for: track)) { d in
                     let problem = AudioFacts.deliveryProblem(track, d)
                     let on = track.delivery == d
-                    Button { track.delivery = d } label: {
+                    Button {
+                        track.delivery = d
+                        if d.isDolbyEncode { DolbyStatus.shared.refresh(open: true) }      // the licence is asked now, not at Start
+                    } label: {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: on ? "largecircle.fill.circle" : "circle")
                                 .font(.system(size: 13)).foregroundStyle(on ? (d == .copy ? Cryo.ice : Cryo.attention) : Cryo.ink3)
@@ -993,7 +1085,16 @@ struct AudioTrackDetails: View {
                     .buttonStyle(.plain)
                     .disabled(problem != nil || !track.include)
                 }
-                if track.delivery != .copy {
+                if track.delivery.isDolbyEncode {
+                    let hd = track.delivery == .trueHDAtmos
+                    CryoDiffTable(rows: [
+                        CryoDiffRow(label: "Codec", from: "\(AudioFacts.codecShort(track)) · ADM", to: hd ? "Dolby TrueHD Atmos" : "E-AC-3 JOC (DD+ Atmos)", changed: true),
+                        CryoDiffRow(label: "Bitrate", from: track.bitRate > 0 ? Fmt.bitrate(track.bitRate) : "—", to: hd ? "lossless, VBR" : "\(DolbyEncode.ddpKbps) Kbps", changed: true),
+                        CryoDiffRow(label: "Channels", from: "\(track.channels) (beds + objects)", to: hd ? "16 elements + 7.1 core" : "objects + 5.1 core", changed: true),
+                        CryoDiffRow(label: "Loudness", from: "the mix", to: "measured only, unchanged", changed: false),
+                        CryoDiffRow(label: "Made by", from: "—", to: DolbyEncode.name, changed: true),
+                    ])
+                } else if track.delivery != .copy {
                     CryoDiffTable(rows: [
                         CryoDiffRow(label: "Codec", from: AudioFacts.codecShort(track), to: track.delivery == .aac ? "AAC" : "PCM 24-bit", changed: true),
                         CryoDiffRow(label: "Bitrate", from: track.bitRate > 0 ? Fmt.bitrate(track.bitRate) : "—",
@@ -1013,6 +1114,8 @@ struct AudioTrackDetails: View {
         case .copy: return "The bits go in unchanged."
         case .aac: return "AAC \(AudioFacts.layout(track)) · \(AudioFacts.aacKbps(track.channels)) Kbps — lossy, for players and MP4. Level, channels, order and sync stay the same."
         case .pcm24: return "PCM 24-bit \(AudioFacts.layout(track)) — lossless; for a float or 32-bit source, or a codec the container can't carry."
+        case .ddpAtmos: return "E-AC-3 JOC · \(DolbyEncode.ddpKbps) Kbps, made by Dolby Media Encoder — plays on Apple TV and TVs; MOV, MP4 or MKV. The Academy's format."
+        case .trueHDAtmos: return "Dolby TrueHD with Atmos, lossless, made by Dolby Media Encoder — for home theater; MKV only."
         }
     }
 

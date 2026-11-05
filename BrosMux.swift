@@ -625,7 +625,7 @@ enum Probe {
                 name = "Dolby Atmos master · ADM BWF"; short = "Atmos ADM master"
                 badges.insert("ADM master", at: 0)
                 include = false
-                warnings.append("Dolby Atmos master (ADM BWF, \(ch) channels) — players can't play it. It can be the sync reference; for playback add a Dolby encode of it (E-AC-3 JOC, or TrueHD Atmos).")
+                warnings.append("Dolby Atmos master (ADM BWF, \(ch) channels) — players can't play it. It can be the sync reference; for playback, encode it on the Audio tab with Dolby Media Encoder (DD+ Atmos, or TrueHD Atmos).")
             } else if codec.hasPrefix("pcm_") && ch > 8 && format.contains("wav") {
                 warnings.append("A \(ch)-channel WAV may be an ADM BWF (Atmos) master. MP4Box can't convert ADM — for Atmos use .ec3/.mp4 (DD+ JOC).")
             }
@@ -2021,6 +2021,7 @@ final class JobRunner {
 
     static func estimatedBytes(_ t: Track, plan: TrimPlan?, encode: TranscodePlan? = nil) -> Double {
         if t.kind == .video, let encode { return encode.estimatedBytes }
+        if t.kind == .audio, t.delivery.isDolbyEncode { return DolbyEncode.estimatedBytes(t, to: t.delivery) }   // not the master's 60 GB
         if t.kind == .audio, let plan, t.sampleRate > 0 {
             let seconds = Double(plan.pad + plan.keep) / t.sampleRate
             return t.isPCM ? Double((plan.pad + plan.keep) * t.blockAlign) : t.bitRate / 8 * seconds
@@ -2139,19 +2140,22 @@ final class JobRunner {
             return JobResult(state: .failed, lines: [error.localizedDescription], output: nil)
         }
 
-        // 2. MP4Box
-        let args = Self.arguments(spec, prepared: prepared, tmp: gpacTmp, output: gpacTmp.appendingPathComponent(outName))
-        onLog("MP4Box " + args.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ") + "\n")
-        let status = runMP4Box(args)
-        if cancel.isSet { return cancelledResult }
-        guard status == 0, fm.fileExists(atPath: tmpOut.path) else {
-            return JobResult(state: .failed, lines: ["MP4Box ended with an error (code \(status)). See the log."], output: nil)
+        // 2. MP4Box (in an MKV made only of TrueHD there's nothing for it to do: the streams go straight to Matroska)
+        let throughMP4Box = spec.tracks.contains { !Self.skipsMP4Box($0, spec) }
+        if throughMP4Box {
+            let args = Self.arguments(spec, prepared: prepared, tmp: gpacTmp, output: gpacTmp.appendingPathComponent(outName))
+            onLog("MP4Box " + args.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ") + "\n")
+            let status = runMP4Box(args)
+            if cancel.isSet { return cancelledResult }
+            guard status == 0, fm.fileExists(atPath: tmpOut.path) else {
+                return JobResult(state: .failed, lines: ["MP4Box ended with an error (code \(status)). See the log."], output: nil)
+            }
         }
         if spec.isMKV {
             onStage("Copying the streams into Matroska (MKV)…", 0.97)
             progress(.mkv, "Copying the streams into Matroska (MKV)…", 0)
             let mkv = tmp.appendingPathComponent("output.mkv")
-            let args = Self.mkvArguments(spec, from: tmpOut, to: mkv)
+            let args = Self.mkvArguments(spec, from: throughMP4Box ? tmpOut : nil, to: mkv)
             onLog("ffmpeg " + args.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ") + "\n")
             let r = Tools.runAll(Tools.ffmpeg ?? "ffmpeg", args)
             if !r.text.isEmpty { onLog(r.text) }
@@ -2167,7 +2171,10 @@ final class JobRunner {
         if let v = spec.tracks.first(where: { $0.kind == .video }) {
             lines.insert(spec.videoEncode.map { "Picture: RE-ENCODED (\($0.source.codecName) → \($0.outputCodecName))" } ?? "Picture: bit-exact copy (\(v.codecName))", at: 0)
         }
-        let outStreams = Probe.raw(tmpOut)?.streams ?? []
+        let outProbe = Probe.raw(tmpOut)
+        let outStreams = outProbe?.streams ?? []
+        // a raw TrueHD stream has no length of its own, and Matroska keeps none per track: the file's length stands in
+        let outDuration = Double(outProbe?.format?.duration ?? "") ?? 0
         func outStream(for i: Int) -> ProbeStream? {
             let t = spec.tracks[i]
             let k = spec.tracks[..<i].filter { $0.kind == t.kind }.count
@@ -2235,7 +2242,7 @@ final class JobRunner {
                 progress(.sync, "Checking sync \(n + 1) of \(audios.count): \(t.title)", 0, key: "sync\(n)")
                 guard let s = outStream(for: i) else { continue }
                 let r = SyncEngine.measure(ref: SyncEngine.Source(ref),
-                                           cand: .init(url: tmpOut, index: s.index, duration: Double(s.duration ?? "") ?? t.duration, channels: s.channels ?? t.channels),
+                                           cand: .init(url: tmpOut, index: s.index, duration: Double(s.duration ?? "") ?? (t.duration > 0 ? t.duration : outDuration), channels: s.channels ?? t.channels),
                                            rate: Int(t.sampleRate > 0 ? t.sampleRate : 48000), maxLag: 10, points: 9,
                                            cancel: cancel) { p in
                     self.onStage("Checking sync \(n + 1) of \(audios.count): \(t.title)", p)
@@ -2440,7 +2447,7 @@ final class JobRunner {
     static func arguments(_ spec: JobSpec, prepared: [Prepared], tmp: URL, output: URL) -> [String] {
         var args: [String] = []
         var firstAudio = true
-        for (t, p) in zip(spec.tracks, prepared) {
+        for (t, p) in zip(spec.tracks, prepared) where !skipsMP4Box(t, spec) {
             var item = p.path + (p.selector ?? "")
             var opts: [String] = []
             if t.kind != .timecode { opts.append("lang=\(t.language)") }
@@ -2464,9 +2471,34 @@ final class JobRunner {
         return args
     }
 
-    /// MP4 → MKV, stream copy; names, languages and default flags are written explicitly (timecode has no place in MKV)
-    static func mkvArguments(_ spec: JobSpec, from src: URL, to dst: URL) -> [String] {
-        var a = ["-nostdin", "-v", "error", "-i", src.path, "-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-c", "copy", "-c:s", "srt"]
+    /// MP4Box can't import TrueHD (GPAC 26.07 answers "Feature Not Supported"), so in an MKV a TrueHD track never goes
+    /// through the MP4: ffmpeg copies it straight from its own file into the Matroska, in its place among the tracks
+    static func skipsMP4Box(_ t: Track, _ spec: JobSpec) -> Bool {
+        spec.isMKV && t.kind == .audio && (t.codecKey == "truehd" || t.codecKey == "mlp")
+    }
+
+    /// MP4 → MKV, stream copy; names, languages and default flags are written explicitly (timecode has no place in MKV).
+    /// `src` is nil when every track skips the MP4 (an MKV of TrueHD only).
+    static func mkvArguments(_ spec: JobSpec, from src: URL?, to dst: URL) -> [String] {
+        let direct = spec.tracks.filter { skipsMP4Box($0, spec) }
+        var a: [String]
+        if direct.isEmpty, let src {
+            a = ["-nostdin", "-v", "error", "-i", src.path, "-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-c", "copy", "-c:s", "srt"]
+        } else {
+            // the TrueHD files are inputs of their own; every track is mapped one by one so the order stays the request's
+            a = ["-nostdin", "-v", "error"]
+            var input: [UUID: Int] = [:], next = 0
+            if let src { a += ["-i", src.path]; next = 1 }
+            for t in direct { a += ["-i", t.url.path]; input[t.id] = next; next += 1 }
+            for kind in [TrackKind.video, .audio, .subtitle] {
+                var n = 0
+                for t in spec.tracks where t.kind == kind {
+                    if let i = input[t.id] { a += ["-map", "\(i):\(t.streamIndex)"] }
+                    else { a += ["-map", "0:\(kind == .video ? "v" : kind == .audio ? "a" : "s"):\(n)"]; n += 1 }
+                }
+            }
+            a += ["-c", "copy", "-c:s", "srt"]
+        }
         var count: [TrackKind: Int] = [:]
         var firstAudio = true, defaultAudioGiven = false
         for t in spec.tracks where t.kind == .video || t.kind == .audio || t.kind == .subtitle {
@@ -2633,12 +2665,15 @@ struct StreamKey: Hashable, Codable { var path: String; var streams: [Int] }
 /// How an audio track goes into the delivered file
 enum AudioDelivery: String, CaseIterable, Identifiable, Codable {
     case copy, aac, pcm24
+    case ddpAtmos, trueHDAtmos          // Beta 2.0.1: an Atmos master encoded by Dolby Media Encoder (DolbyEncode.swift)
     var id: String { rawValue }
     var label: String {
         switch self {
         case .copy: return "COPY · bit-exact"
         case .aac: return "TRANSCODE → AAC"
         case .pcm24: return "TRANSCODE → PCM 24-bit"
+        case .ddpAtmos: return "DOLBY ENCODE → DD+ ATMOS"
+        case .trueHDAtmos: return "DOLBY ENCODE → TRUEHD ATMOS"
         }
     }
 }
@@ -3778,7 +3813,11 @@ final class Project {
             text = "ffmpeg " + quote(Transcode.arguments(e, concat: nil, output: tmp.appendingPathComponent("video.hevc"), elementary: true)) +
                 (e.hdr?.hdr10plus != nil ? "\nhdr10plus_tool inject …" : "") + (e.hdr?.dolbyVision != nil ? "\ndovi_tool generate --xml … -p 8.1 && dovi_tool inject-rpu …" : "") + "\n" + text
         }
-        if spec.isMKV { text += "\nffmpeg " + quote(JobRunner.mkvArguments(spec, from: mp4, to: spec.output)) }
+        if spec.isMKV {
+            let throughMP4Box = spec.tracks.contains { !JobRunner.skipsMP4Box($0, spec) }
+            let mkv = "ffmpeg " + quote(JobRunner.mkvArguments(spec, from: throughMP4Box ? mp4 : nil, to: spec.output))
+            text = throughMP4Box ? text + "\n" + mkv : mkv
+        }
         return text
     }
 
@@ -4438,6 +4477,11 @@ func snapshot(_ args: [String]) {
     if args.contains("--demo-running") { DeliveryQueue.shared.loadDemoRunningJob(); project.mode = .delivery }
     if let t = value("--tab") {             // --tab video|audio|subtitles|delivery|inspect|qc|atmos
         if let m = AppMode(rawValue: t.lowercased()) { project.mode = m } else { print("--tab: unknown tab “\(t)” (\(AppMode.allCases.map(\.rawValue).joined(separator: " ")))") }
+    }
+    // Beta 2.0.1: --audio-delivery ddpAtmos|trueHDAtmos draws the Atmos masters already chosen for the Dolby encode
+    if let d = value("--audio-delivery").flatMap(AudioDelivery.init(rawValue:)), d.isDolbyEncode {
+        for i in project.tracks.indices where project.tracks[i].isADMMaster { project.tracks[i].include = true; project.tracks[i].delivery = d }
+        if let t = project.tracks.first(where: \.isADMMaster) { AudioTabState.shared.selected = t.id }
     }
     if let s = value("--size") {            // --size 800x600
         let wh = s.lowercased().split(separator: "x").compactMap { Double($0) }

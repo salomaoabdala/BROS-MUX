@@ -16,6 +16,9 @@
 #      do encode Dolby Vision não pode mudar sem querer);
 #   4. Transcode pelo --transcode: cada preset (ProRes 422 HQ, ProRes 422, H.264, HEVC) em cada clipe, conferindo com
 #      ffprobe codec, pixel format, frames, frame rate, tags de cor (iguais às da fonte), timecode e áudio;
+#   4c. TrueHD 5.1 copiado para um MKV (o MP4Box não importa TrueHD: ele vai direto para o Matroska, bit a bit);
+#   4d. Dolby Media Encoder, quando está instalado e o master Atmos real está montado (BROS_QC_ADM troca o caminho):
+#      30 s do master → DD+ Atmos num MP4 e TrueHD Atmos num MKV, conferidos (codec, Atmos, JOC, duração, bit a bit);
 #   5. capturas de cada aba (--snapshot) em qc/out/shots, com as da rodada anterior em qc/out/previous para comparar;
 #   6. abre o app e confere que ele continua aberto.
 # Escreve qc/out/QC-REPORT.txt e termina com código 1 se algo reprovou. Os caminhos não podem ter espaços.
@@ -228,6 +231,37 @@ if ! "$BIN" --job-file "$JF/dvcopy.bmjob" --dry-run >> "$LOGS/jobfile_dvcopy.txt
   pass "Dolby Vision carregado com a imagem em COPY: o job se recusa a começar e diz por quê (nunca em silêncio)"
 else fail "Dolby Vision com a imagem em COPY não foi recusado (veja $LOGS/jobfile_dvcopy.txt)"; fi
 
+# 4c. TrueHD num MKV (Beta 2.0.1): o MP4Box não importa TrueHD; o app o copia direto para o Matroska, bit a bit
+[[ -s $CLIPS/truehd51.thd ]] || $FF -i "$CLIPS/tone.L.wav" -i "$CLIPS/tone.R.wav" -i "$CLIPS/tone.C.wav" -i "$CLIPS/tone.LFE.wav" -i "$CLIPS/tone.Ls.wav" -i "$CLIPS/tone.Rs.wav" \
+  -filter_complex "[0:a][1:a][2:a][3:a][4:a][5:a]join=inputs=6:channel_layout=5.1(side)[a]" -map "[a]" -c:a truehd -strict -2 "$CLIPS/truehd51.thd"
+L=$LOGS/mux_truehd_mkv.txt; rm -f "$OUT/mux/truehd.mkv"
+"$BIN" --job -o "$OUT/mux/truehd.mkv" --video "$CLIPS/h264_709.mov" --add "$CLIPS/truehd51.thd" --no-picture-check > "$L" 2>&1
+TC=$(probe a:0 codec_name "$OUT/mux/truehd.mkv"); NV=$(ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$OUT/mux/truehd.mkv" 2>/dev/null | grep -c .)
+if grep -q '^RESULT.*: ok' "$L" && grep -q 'bit-identical ✓' "$L" && [[ $TC == truehd && $NV == 1 ]]; then
+  pass "TrueHD 5.1 num MKV com imagem: entra direto no Matroska (o MP4Box não importa TrueHD), bit a bit idêntico, sync ok"
+else fail "TrueHD num MKV: áudio ${TC:-nenhum}, $NV vídeo(s) (veja $L)"; fi
+
+# 4d. Dolby Media Encoder (Beta 2.0.1): 30 s de um master Atmos real → DD+ Atmos (MP4) e TrueHD Atmos (MKV)
+ADM=${BROS_QC_ADM:-/Volumes/A018/2Die4_20260209_Atmos_Cinema .wav}
+DME="/Applications/Dolby/Dolby Media Encoder/Dolby Media Encoder.app"
+if [[ ! -d $DME ]]; then warn "Dolby Media Encoder: não testado — o DME não está instalado neste Mac"
+elif [[ ! -f $ADM ]]; then warn "Dolby Media Encoder: não testado — o master Atmos não está aqui ($ADM; outro: BROS_QC_ADM=…)"
+else
+  export BROS_DME_TEST_RANGE="00:10:00:00-00:10:30:00"
+  for case in ddpAtmos:mp4:eac3 trueHDAtmos:mkv:truehd; do
+    d=${case%%:*}; rest=${case#*:}; ext=${rest%%:*}; codec=${rest#*:}
+    o=$JF/dme_$d.$ext; L=$LOGS/jobfile_dme_$d.txt; rm -f "$o"
+    "$BIN" --job-file --capture "$JF/dme_$d.bmjob" --audio-delivery $d -o "$o" --add "$ADM" > "$JF/dme_$d.capture.txt" 2>&1
+    "$BIN" --job-file "$JF/dme_$d.bmjob" > "$L" 2>&1
+    c=$(probe a:0 codec_name "$o"); prof=$(probe a:0 profile "$o")
+    others=$(grep -E '✗|⚠' "$L" | grep -vc 'Render QC couldn.t read\|QC test range\|There.s no picture')
+    if grep -qE '^RESULT.*: (ok|done|warning)' "$L" && grep -q 'Dolby Media Encoder made in step 1 ✓' "$L" && [[ $c == $codec && $prof == *Atmos* && $others == 0 ]]; then
+      pass "Dolby Media Encoder → $d ($ext): $prof, $(grep -o 'Length: [^✓]*✓' "$L" | tail -1), copiado bit a bit (30 s do master, faixa de teste)"
+    else fail "Dolby Media Encoder → $d: codec ${c:-nenhum} ${prof:-}, $others problema(s) (veja $L)"; fi
+  done
+  unset BROS_DME_TEST_RANGE
+fi
+
 # 5. capturas ---------------------------------------------------------------------------------------------------
 snap() {
   local name=$1; shift
@@ -248,6 +282,7 @@ snap audio-stereo --tab audio --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.
 snap audio-monos --tab audio --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav"
 snap popup-useaudio --popup useaudio --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav"
 snap audio-group --tab audio --video "$CLIPS/h264_709.mov" $MONOS
+[[ -f $ADM ]] && snap audio-atmos-master --tab audio --video "$CLIPS/h264_709.mov" --add "$ADM"
 snap subtitles --tab subtitles --video "$CLIPS/h264_709.mov"
 snap delivery --tab delivery --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
 snap delivery-running --demo-running

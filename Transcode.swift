@@ -1187,6 +1187,7 @@ enum AudioTranscode {
         case .copy: return "COPY · bit-exact"
         case .aac: return "TRANSCODE → AAC \(ch) · \(aacKbps(channels: t.channels)) Kbps"
         case .pcm24: return "TRANSCODE → PCM 24-bit \(ch)"
+        case .ddpAtmos, .trueHDAtmos: return "DOLBY ENCODE → \(DolbyEncode.target(to)) (Dolby Media Encoder)"
         }
     }
 
@@ -1275,6 +1276,8 @@ enum AudioTranscode {
         guard to != .copy else { return nil }
         let name = "“\(t.title)”"
         guard t.kind == .audio else { return "\(name) isn't audio." }
+        if to.isDolbyEncode { return DolbyEncode.problem(t, to: to) }
+        if t.isADMMaster { return "\(name) is a Dolby Atmos master: it only becomes playable through a Dolby encode (DD+ Atmos or TrueHD Atmos)." }
         if dolbyCodecs.contains(t.codecKey) || t.isAtmos {
             return "\(name) is Dolby (\(t.codecName)): it only goes in as it is (COPY) — re-encoding would lose the Dolby / Atmos metadata."
         }
@@ -1304,6 +1307,7 @@ enum AudioTranscode {
     static func prepare(_ t: Track, plan: TrimPlan?, to: AudioDelivery, folder: URL, index: Int, cancel: CancelFlag,
                         progress: (Double) -> Void) throws -> URL {
         guard to != .copy else { throw AppError("Nothing to transcode: “\(t.title)” goes in as it is (COPY).") }
+        guard !to.isDolbyEncode else { throw AppError("A Dolby encode is made by Dolby Media Encoder (DolbyEncode.encode), not by ffmpeg.") }
         if let p = problem(t, to: to) { throw AppError(p) }
         guard Tools.ffmpeg != nil else { throw AppError("ffmpeg isn't installed. Run: brew install ffmpeg") }
         guard let roles = writtenRoles(t), let layout = outputLayout(roles, for: to) else { throw AppError("The channels of “\(t.title)” aren't identified.") }
@@ -1478,6 +1482,12 @@ enum AudioTranscode {
     static func verify(final: URL, audioOrdinal: Int, source: Track, plan: TrimPlan?, to: AudioDelivery) -> [String] {
         let name = "Audio “\(source.title)” (\(targetText(source, to: to)))"
         guard to != .copy else { return [] }
+        if to.isDolbyEncode {
+            // the Atmos objects can't be decoded here: what can be read is checked (codec, Atmos, JOC, core, length);
+            // the sync of the core against the reference is the mux's own "Sync" check
+            let c = DolbyEncode.checkStream(final, ordinal: audioOrdinal, to: to, sourceDuration: DolbyEncode.expectedDuration(source, plan: plan))
+            return c.lines.map { "\(name) · \($0)" }
+        }
         guard let roles = writtenRoles(source), let layout = outputLayout(roles, for: to) else { return ["\(name): the channels aren't identified — can't verify ✗"] }
         _ = layout
         let n = source.channels

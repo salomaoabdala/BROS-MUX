@@ -177,6 +177,7 @@ enum DeliveryEngine {
     static func estimatedTempBytes(_ project: Project) -> Double {
         var b = step1Plan(project)?.estimatedBytes ?? 0
         for t in project.outputAudio where t.delivery != .copy {
+            if t.delivery.isDolbyEncode { b += DolbyEncode.estimatedBytes(t, to: t.delivery); continue }
             b += t.delivery == .aac ? Double(t.channels > 2 ? 640_000 : 256_000) / 8 * t.duration : Double(t.channels * 3) * t.sampleRate * t.duration
         }
         return b
@@ -224,7 +225,20 @@ enum DeliveryEngine {
 
         // what can't go into this container as it is
         for t in project.outputAudio {
-            if t.delivery != .copy {
+            if t.delivery.isDolbyEncode {
+                if let p = AudioTranscode.problem(t, to: t.delivery) { add(.fail, "“\(t.title)” can't be \(t.delivery.label): \(p)", .audio) }
+                else if t.delivery == .trueHDAtmos && project.container != .mkv {
+                    add(.fail, "“\(t.title)”: TrueHD Atmos goes in MKV only (MOV and MP4 players don't play TrueHD) — choose MKV on the Video tab, or DD+ Atmos.", .audio)
+                } else if let p = project.plan(for: t), p.pad > 0 || p.cut > 0 {
+                    add(.fail, DolbyEncode.headTrimText(t), .audio)
+                } else {
+                    switch DolbyStatus.shared.state {
+                    case .ready(let s): add(.info, "“\(t.title)” is encoded by \(s) before the mux.", .audio)
+                    case .closed: add(.info, "“\(t.title)” is encoded by \(DolbyEncode.name), which BROS-MUX opens in the background when the Delivery starts.", .audio)
+                    default: add(.info, "“\(t.title)” is encoded by \(DolbyEncode.name) before the mux; its licence is checked when the Delivery starts.", .audio)
+                    }
+                }
+            } else if t.delivery != .copy {
                 if let p = AudioTranscode.problem(t, to: t.delivery) { add(.fail, "“\(t.title)” can't be \(t.delivery.label): \(p)", .audio) }
             } else if let r = project.audioConversionReason(t) {
                 add(.fail, "“\(t.title)” can't go into \(project.container.rawValue.uppercased()) as it is: \(r)", .audio)
@@ -551,20 +565,38 @@ final class DeliveryRun {
             guard let work else { break }
             let what = DeliveryReport.audioRole(a.track, a.to)
             do {
-                let url = try AudioTranscode.prepare(a.track, plan: a.plan, to: a.to, folder: work, index: n, cancel: cancel) { [weak self] p in
-                    self?.onStage("Transcoding “\(a.track.title)” → \(what) (\(n + 1) of \(self?.x.audioSteps.count ?? 0))…", p, .audio)
+                // Beta 2.0.1: an Atmos master is encoded by Dolby Media Encoder; everything else by ffmpeg
+                var dolby: DolbyEncode.Made?
+                let url: URL
+                if a.to.isDolbyEncode {
+                    let m = try DolbyEncode.encode(a.track, plan: a.plan, to: a.to, folder: work, index: n, cancel: cancel) { [weak self] s, p in
+                        self?.onStage("“\(a.track.title)” → \(what) (\(n + 1) of \(self?.x.audioSteps.count ?? 0)) · \(s)", p, .audio)
+                    }
+                    dolby = m; url = m.url
+                } else {
+                    url = try AudioTranscode.prepare(a.track, plan: a.plan, to: a.to, folder: work, index: n, cancel: cancel) { [weak self] p in
+                        self?.onStage("Transcoding “\(a.track.title)” → \(what) (\(n + 1) of \(self?.x.audioSteps.count ?? 0))…", p, .audio)
+                    }
                 }
                 guard var t = Probe.tracks(for: url).tracks.first(where: { $0.kind == .audio }) else {
                     return end(.failed, ["“\(a.track.title)”: the transcoded audio can't be read back; nothing was written to the destination."])
                 }
                 t.include = true; t.title = a.track.title; t.language = a.track.language; t.enabled = a.track.enabled
-                t.channelMap = a.track.channelMap
-                t.channelRoles = a.track.channelPermutation != nil ? a.track.channelTarget?.roles : a.track.channelRoles
+                if dolby == nil {
+                    t.channelMap = a.track.channelMap
+                    t.channelRoles = a.track.channelPermutation != nil ? a.track.channelTarget?.roles : a.track.channelRoles
+                }
                 t.channelTarget = nil
                 t.delivery = .copy
                 spec.plans[a.track.id] = nil
                 spec.tracks[a.index] = t
                 transcoded.append((a.track, t, a))
+                if let dolby {
+                    let line = "“\(a.track.title)”: DOLBY ENCODE → \(what) by \(DolbyEncode.name), in a step before the mux (from the \(a.track.channels)-channel ADM master) — then copied bit for bit"
+                    steps.append(("Audio · “\(a.track.title)” → \(what)", dolby.command.isEmpty ? nil : dolby.command, [line] + dolby.lines))
+                    ([line] + dolby.lines).forEach(onFinding)
+                    continue
+                }
                 let line = "“\(a.track.title)”: TRANSCODED → \(what) in a step before the mux (from \(a.track.codecName) \(Probe.channelText(a.track.channels, a.track.channelLayout))) — level, channels, order and sync unchanged, checked after writing"
                 steps.append(("Audio · “\(a.track.title)” → \(what)", nil, [line]))
                 onFinding(line)
@@ -599,6 +631,10 @@ final class DeliveryRun {
                 lines[i] = lines[i].replacingOccurrences(of: ": bit-identical ✓", with: ": bit-identical to the picture made in step 1 ✓")
             }
             for t in transcoded where lines[i].hasPrefix("Audio “\(t.original.title)”: bit-identical ✓") {
+                if t.step.to.isDolbyEncode {
+                    lines[i] = "Audio “\(t.original.title)”: identical to the \(DeliveryReport.audioRole(t.original, t.step.to)) Dolby Media Encoder made in step 1 ✓"
+                    continue
+                }
                 lines[i] = "Audio “\(t.original.title)”: identical to the \(t.step.to == .aac ? "AAC" : "PCM 24-bit") made in step 1" + (t.step.to == .aac ? " (the AAC itself is lossy)" : "") + " ✓"
             }
         }
@@ -683,12 +719,14 @@ enum DeliveryReport {
         case .aac: return "AAC \(t.channels > 2 ? 640 : 256) Kbps"
         case .pcm24: return "PCM 24-bit"
         case .copy: return "COPY · bit-exact"
+        case .ddpAtmos, .trueHDAtmos: return DolbyEncode.target(to)
         }
     }
 
     static func role(_ t: Track, in x: DeliveryExecution) -> String {
         let ref = x.referenceID == t.id
         if !t.include { return ref ? "SYNC REFERENCE · not in the file" : "not in the file" }
+        if t.kind == .audio && t.delivery.isDolbyEncode { return "DOLBY ENCODE → \(audioRole(t, t.delivery)) by Dolby Media Encoder (step 1)" + (ref ? " · SYNC REFERENCE" : "") }
         if t.kind == .audio && t.delivery != .copy { return "TRANSCODED → \(audioRole(t, t.delivery)) (step 1)" + (ref ? " · SYNC REFERENCE" : "") }
         if t.kind == .video {
             if let p = x.step1 { return "TRANSCODED → \(p.outputCodecName) (step 1), then MUXED" }
@@ -705,7 +743,9 @@ enum DeliveryReport {
         s += "Job: \(x.job.name) · \(x.job.id.uuidString)" + (jobFile.map { " · \($0.path)" } ?? "") + "\n\n"
         s += "WHAT THIS DELIVERY DID\n• \(x.pictureText)\n"
         for t in x.spec.tracks where t.kind == .audio {
-            s += "• Audio “\(t.title)”: " + (t.delivery == .copy ? "COPY · bit-exact" : "TRANSCODE → \(audioRole(t, t.delivery)) — level, channels, order and sync unchanged") + "\n"
+            s += "• Audio “\(t.title)”: " + (t.delivery == .copy ? "COPY · bit-exact"
+                : t.delivery.isDolbyEncode ? "DOLBY ENCODE → \(audioRole(t, t.delivery)) by \(DolbyEncode.name) from the ADM master — codec, Atmos and length checked, sync measured against the reference"
+                : "TRANSCODE → \(audioRole(t, t.delivery)) — level, channels, order and sync unchanged") + "\n"
         }
         s += "\nSOURCES AND WHERE EACH WENT\n"
         for t in x.tracks {
@@ -1062,7 +1102,12 @@ enum DeliveryCLI {
         if project.hdr.encode { project.video.choose(.hevcHDR, project: project) }
         if videoCopy { project.video.choose(.copy, project: project) }
         if let to, let p = TranscodePreset.named(to) { project.video.choose(.transcode(VideoTranscodeSettings(preset: p.rawValue)), project: project) }
-        if let audioDelivery { for i in project.tracks.indices where project.tracks[i].kind == .audio && project.tracks[i].include { project.tracks[i].delivery = audioDelivery } }
+        if let audioDelivery, audioDelivery.isDolbyEncode {
+            // a Dolby encode is for the Atmos masters: each goes into the file, encoded (the other tracks stay as they are)
+            for i in project.tracks.indices where project.tracks[i].isADMMaster { project.tracks[i].include = true; project.tracks[i].delivery = audioDelivery }
+        } else if let audioDelivery {
+            for i in project.tracks.indices where project.tracks[i].kind == .audio && project.tracks[i].include { project.tracks[i].delivery = audioDelivery }
+        }
         let job = DeliveryJob.capture(project)
         let url = URL(fileURLWithPath: path)
         do {

@@ -26,6 +26,45 @@ Toda atualização do BROS-MUX é registrada aqui: o que entrou, o que mudou, o 
 - **Marcação de cor do encode HDR/Dolby Vision corrigida — era o erro mais grave do app.** Um master P3-D65 (como o 2DIE4) saía marcado `colorprim=12` (P3-D65) e `colormatrix=1` (BT.709) num stream PQ, sem `chromaloc`, e com o `hdr10-opt` desligado em silêncio pelo x265 (ele só funciona com primárias 9, transfer 16, matriz 9). A camada base de um Dolby Vision 8.1 é um HDR10, e HDR10 é BT.2020; não existe matriz Y'CbCr padronizada para P3-D65 (SMPTE ST 2067-21:2020 diz textualmente que P3-D65 com Y'CbCr não é suportado). A causa era `outputColor` em `Transcode.swift`: "a matriz segue as primárias", que mandava P3-D65 para BT.709, e `isBT2020` dando falso pulava o chroma siting. Agora, num encode HDR, um master P3-D65 ou BT.709 é **convertido para BT.2020 em luz linear** (`ColorLUT.swift`: PQ decodificado → matriz 3×3 → PQ, numa LUT 3D de 65³ aplicada em float pelo `lut3d` do ffmpeg, porque este ffmpeg não tem `zscale`), e sai `bt2020 / smpte2084 / bt2020nc`, `chromaloc=2`, chroma siting top-left, caixa `colr` 9/16/9 — com o `hdr10-opt` finalmente ativo. As cores não mudam: BT.2020 é o recipiente; o mastering display continua P3-D65 no SEI, que é o lugar dele. Conferido contra a conta exata num frame real do 2DIE4: erro máximo de 0,58 código em 10 bits, 100% dos pixels dentro de 1 código. **Masters já codificados com a marcação antiga precisam ser reencodados; trocar só a etiqueta deixaria pior** (expandiria o gamut de pixels P3).
 - **Picture check: cortes deslocados em 1 frame em algumas janelas.** O ffmpeg descarta os frames anteriores ao `-ss` depois de convertê-lo para a base de tempo do vídeo (1/24 num MOV de 24 fps); o app pedia meio frame antes do frame-alvo com seis casas decimais, e isso caía ora de um lado, ora do outro do arredondamento — numa janela saía um frame a mais no início e todos os cortes daquela janela (e as miniaturas do Sync Viewer) ficavam 1 frame atrasados (visto no 2DIE4: o corte de 21:30.583 lido como 21:30.625 numa conferência de 60 janelas). Agora o seek começa um quarto de frame antes, que arredonda sempre para o frame certo.
 
+## v2.0.1 — 2026-11-05 · Beta 2.0.1 (prévia de trabalho, não publicada)
+
+Versão de trabalho, instalada ao lado do app estável no lugar da Beta 2.0.0 (`/Applications/BROS-MUX Beta 2.0.1.app`).
+
+### Adicionado
+- **Encode Dolby pelo Dolby Media Encoder, dentro da aba Audio.** Um master Dolby Atmos (ADM BWF, mais de 16 canais) solto na aba Audio ganha o cartão "This is a Dolby Atmos master". Ele mostra o que foi detectado e a recomendação, e tem os botões:
+  - "Encode → DD+ Atmos" (E-AC-3 JOC a 768 Kbps, para MOV, MP4 ou MKV, Apple TV e Academia);
+  - "Encode → TrueHD Atmos" (sem perda; muda o arquivo para MKV);
+  - "Only for sync".
+
+  O BROS-MUX não codifica Dolby por conta própria. O DME (4.0, licença no iLok) roda um servidor local que a própria janela dele usa, e o BROS-MUX manda por ele o mesmo modelo de trabalho que essa janela manda: o master inteiro, um encoder e a saída. Ele abre o DME em segundo plano quando está fechado, acompanha o progresso e cancela junto quando você cancela.
+  - **Na faixa:** banner âmbar "DOLBY ENCODE" com master → destino, o que muda (núcleo 5.1 ou 7.1 para quem não tem Atmos; a loudness é só medida, nunca alterada; o master é só lido) e a situação do DME com a licença ("Dolby Media Encoder 4.0.0 · licence active until 3 Feb 2027"), ou o motivo de não dar.
+  - **No inspetor ("In the delivery"):** um master Atmos mostra só os dois encodes Dolby, com a tabela de antes → depois.
+  - **Delivery:** o encode é a etapa antes do mux; o resultado é copiado bit a bit e conferido (codec, Atmos sinalizado, JOC e índice de complexidade no DD+, núcleo, duração contra o master). O relatório "HOW THIS FILE WAS MADE" traz o comando exato que o DME rodou (`dee_ddpjoc_encoder …` ou `dee_dthd_encoder …`).
+  - **Linha de comando:** `--job-file --capture … --audio-delivery ddpAtmos|trueHDAtmos` põe os masters Atmos no arquivo já encodados. Para as capturas, `--snapshot --audio-delivery …` mostra o mesmo.
+  - **Medido no 2DIE4** (master de 117 canais, 1h00m01s, 60 GB):
+    - o DD+ Atmos do filme inteiro saiu em 7 min (415 s): 345,8 MB, 768 Kbps CBR, índice de complexidade 16, 15 objetos dinâmicos, 01:00:01.312 contra 01:00:01.292 do master;
+    - o núcleo 5.1 fica +5,1 a +5,3 ms atrás da soma do master aos 6, 30 e 54 min, constante, sem deriva. São os 256 samples do próprio decodificador E-AC-3, os mesmos +5 ms já medidos no Atmos da Deluxe, dentro da tolerância de −15/+45 ms;
+    - 30 s em TrueHD Atmos: "Dolby TrueHD with Dolby Atmos", 16 elementos, núcleo 7.1, +6 ms.
+- **O app guia sozinho:**
+  - quando o DME não está instalado, o cartão diz isso e como resolver (Dolby Professional Store + iLok License Manager);
+  - quando a licença não está ativa, a Delivery não começa e diz por quê;
+  - TrueHD Atmos fora de um MKV ganha o aviso e o botão "Change the container to MKV".
+
+### Mudado
+- **Um master Atmos que passa do fim da imagem não é mais cortado depois:** o DME encoda só até o fim da imagem (EncodeEnd no frame certo). Medido: imagem de 12 s + master de 1 h → DD+ de 12,000 s. Um master que precisaria de corte ou atraso na cabeça é recusado com o motivo, porque os objetos Atmos são contados a partir do começo.
+- A estimativa de espaço livre conta o encode Dolby (DD+ ou TrueHD), não os 60 GB do master.
+- O aviso do inspetor sobre o master Atmos agora aponta o encode na própria aba Audio.
+- `qc.sh` ganhou três testes:
+  - TrueHD 5.1 copiado para MKV;
+  - DME → DD+ Atmos (MP4) com 30 s do master real;
+  - DME → TrueHD Atmos (MKV) com 30 s do master real.
+
+  Os testes com o DME só rodam quando ele está instalado e o master montado (`BROS_QC_ADM` troca o caminho). Há também capturas da aba Audio com o master Atmos.
+
+### Corrigido
+- **TrueHD não entrava em MKV nenhum, nem em cópia.** O MKV do app passa primeiro por um MP4 do MP4Box, e o MP4Box desta máquina (GPAC 26.07) não importa TrueHD ("Feature Not Supported"; com `.mlp` ele travava). Agora, num MKV, o TrueHD pula o MP4 e o ffmpeg o copia direto para o Matroska, no lugar dele entre as faixas. Conferido: TrueHD 5.1 com imagem, bit a bit idêntico, sync exato em 9 de 9 pontos. Os comandos dos MKV sem TrueHD não mudam (saída dourada).
+- **Sync de TrueHD cru (`.thd`) era "too short to measure".** O stream não tem duração e o Matroska não guarda uma por faixa; a checagem agora usa a duração do arquivo final.
+
 ## v2.0.0 — 2026-11-05 · Beta 2.0.0 (prévia de trabalho, não publicada)
 
 Versão de trabalho, instalada ao lado do app estável (`/Applications/BROS-MUX Beta 2.0.0.app`, bundle próprio). Inclui também tudo o que está em "Em desenvolvimento" acima (a v1.7 em preparo). Projeto e regras em `PLANO-BETA-2.0.0.md`.
