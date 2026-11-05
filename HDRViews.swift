@@ -1,90 +1,116 @@
-// BROS-MUX Beta 2.0.0 — the HDR panels (moved unchanged from HDR.swift; the engine stays there).
+// BROS-MUX Beta 2.0.0 — the HDR panels, in A · CRYO (the engine stays in HDR.swift). Signatures as before; the
+// encode switch goes through the Video tab's plan (project.video.choose), never straight to hdr.encode.
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - Interface
 
-/// The HDR & Dolby Vision section of the Mux inspector
+/// The advanced HDR · Dolby Vision · HDR10+ section of the Video inspector
 struct HDRPanel: View {
     @Environment(Project.self) private var project
 
     var body: some View {
         @Bindable var hdr = project.hdr
-        let v = project.videoTrack
+        let video = project.video
+        let on = video.choice(project) == .hevcHDR
         let frames = project.videoFrames
-        Section {
-            Toggle("Encode the picture for playback", isOn: Binding(get: { hdr.encode }, set: { hdr.encode = $0; hdr.autoEnabledBy = nil; hdr.autoReason = nil; hdr.bannerCollapsed = false }))
-                .toggleStyle(.switch).disabled(project.busy)
-            if let imf = hdr.imf {
-                LabeledContent("IMF") {
-                    Text("\(imf.title) · \(Fmt.int(frames)) frames @ \(imf.editRate) fps").multilineTextAlignment(.trailing)
+        VStack(alignment: .leading, spacing: 12) {
+            CryoSectionHeader("HDR · Dolby Vision · HDR10+")
+            Toggle(isOn: Binding(get: { on }, set: { video.choose($0 ? .hevcHDR : .copy, project: project) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Transcode to HEVC 10-bit HDR").font(CryoFont.body(12.5)).foregroundStyle(Cryo.ink)
+                    Text(on ? "The picture is encoded again to HEVC 10-bit — the only way Dolby Vision, HDR10+ and HDR10 play on TVs, Apple TV, iPhone and Mac. The audio stays bit-exact."
+                            : "Masters (ProRes, JPEG 2000, IMF) don't play on TVs or Apple devices. Turn this on for a playback version: HEVC 10-bit with HDR10, and Dolby Vision / HDR10+ when their metadata is here.")
+                        .font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if hdr.encode {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle(isOn: Binding(get: { hdr.dolbyVision && hdr.dvSource != nil }, set: { hdr.dolbyVision = $0 })) {
-                        Text("Dolby Vision 8.1")
-                    }
-                    .toggleStyle(.checkbox).disabled(hdr.dvSource == nil)
-                    metaLine(hdr.dvSource?.label ?? "No Dolby Vision metadata",
-                             detail: hdr.dvChecking ? "Reading…" : hdr.dvProblem ?? hdr.dvSummary?.line,
-                             bad: hdr.dvProblem != nil)
-                    Button(hdr.dvSource == nil ? "Choose Dolby Vision XML…" : "Change…") {
-                        hdr.chooseDolbyVision(width: project.videoWidth, height: project.videoHeight, frames: frames)
-                    }.controlSize(.small)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle(isOn: Binding(get: { hdr.hdr10plus && hdr.hdr10plusJSON != nil }, set: { hdr.hdr10plus = $0 })) {
-                        Text("HDR10+")
-                    }
-                    .toggleStyle(.checkbox).disabled(hdr.hdr10plusJSON == nil)
-                    metaLine(hdr.hdr10plusJSON?.lastPathComponent ?? "No HDR10+ metadata (Samsung TVs then use HDR10)",
-                             detail: hdr.hdr10plusProblem ?? hdr.hdr10plusFrames.map { $0 >= 0 ? "\(Fmt.int($0)) frames" + ($0 == frames ? " ✓" : " — the picture has \(Fmt.int(frames))") : "" },
-                             bad: hdr.hdr10plusProblem != nil || (hdr.hdr10plusFrames.map { $0 >= 0 && $0 != frames } ?? false))
-                    Button(hdr.hdr10plusJSON == nil ? "Choose HDR10+ JSON…" : "Change…") { hdr.chooseHDR10Plus(frames: frames) }.controlSize(.small)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("HDR10 (always)")
-                    metaLine("\(hdr.mastering.text) · MaxCLL \(hdr.maxCLL) · MaxFALL \(hdr.maxFALL)", detail: hdr.masteringSource, bad: false)
+            .toggleStyle(CryoToggleStyle()).disabled(project.busy || project.videoSource == nil)
+
+            if let imf = hdr.imf {
+                VideoKV("IMF", "\(imf.title) · \(Fmt.int(frames)) frames @ \(imf.editRate) fps")
+            }
+
+            metadataRow(kind: .dolbyVision,
+                        file: hdr.dvSource?.label,
+                        detail: hdr.dvChecking ? "Reading…" : hdr.dvProblem ?? hdr.dvSummary?.line,
+                        bad: hdr.dvProblem != nil,
+                        empty: "No Dolby Vision metadata (an XML from DaVinci Resolve, or an IMF DOLBY_….mxf)")
+            metadataRow(kind: .hdr10Plus,
+                        file: hdr.hdr10plusJSON?.lastPathComponent,
+                        detail: hdr.hdr10plusProblem ?? hdr.hdr10plusFrames.map { $0 >= 0 ? "\(Fmt.int($0)) frames" + (frames == 0 ? "" : $0 == frames ? " — the picture has as many" : " — the picture has \(Fmt.int(frames))") : "" },
+                        bad: hdr.hdr10plusProblem != nil || (hdr.hdr10plusFrames.map { $0 >= 0 && frames > 0 && $0 != frames } ?? false),
+                        empty: "No HDR10+ metadata (Samsung TVs then use HDR10)")
+
+            if on {
+                VStack(alignment: .leading, spacing: 3) {
+                    CryoFieldLabel("HDR10 (always)")
+                    Text(verbatim: "\(hdr.mastering.text) · MaxCLL \(hdr.maxCLL) · MaxFALL \(hdr.maxFALL)").font(CryoFont.mono(11)).foregroundStyle(Cryo.ink)
+                    Text(hdr.masteringSource).font(CryoFont.body(10.5)).foregroundStyle(hdr.masteringSource.contains("defaults") ? Cryo.attention : Cryo.ink3)
                 }
                 RateControlRows(hdr: hdr, showsQuality: true, disabled: project.busy)
-                Picker("Speed", selection: $hdr.speed) {
-                    ForEach(HDRSettings.Speed.allCases) { Text($0.label).tag($0) }
-                }
-                .disabled(project.busy)
+                VideoSpeedRow(speed: $hdr.speed, disabled: project.busy, hdrMetadata: true, encoder: "x265")
                 if let plan = project.encodePlan {
-                    Label("Output: \(plan.formats) · ~\(Fmt.bytes(plan.estimatedBytes)) of picture · about \(Fmt.hm(plan.estimatedSeconds)) of encoding on this Mac (rough; it can run overnight — the Mac won't sleep)",
-                          systemImage: "clock").font(.caption).foregroundStyle(.secondary)
-                    Label("Colour: \(plan.outputColor.text)" + (plan.colourNote.map { " — \($0)" } ?? (plan.source.color.isComplete ? " — read from the source and repeated in the output" : " — primaries/transfer missing in the source; BT.2020 / PQ assumed")),
-                          systemImage: "paintpalette").font(.caption).foregroundStyle(plan.source.color.isComplete ? Color.secondary : Color.orange)
+                    if VideoToolsGate.shared.ready {
+                    VideoNote(symbol: "clock", color: Cryo.ink2,
+                              text: "Output: \(plan.formats) · ~\(Fmt.bytes(plan.estimatedBytes)) of picture · about \(Fmt.hm(plan.estimatedSeconds)) of encoding on this Mac (rough; it can run overnight — the Mac won't sleep)")
+                    }
+                    VideoNote(symbol: "paintpalette", color: plan.source.color.isComplete ? Cryo.ink2 : Cryo.attention,
+                              text: "Colour: \(plan.outputColor.text)" + (plan.colourNote.map { " — \($0)" } ?? (plan.source.color.isComplete ? " — read from the source and repeated in the output" : " — primaries/transfer missing in the source; BT.2020 / PQ assumed")))
                     // a master that isn't BT.2020: the app says so and recommends the conversion, never converts (or skips) in silence
                     if let from = plan.gamutConversion ?? (plan.gamutWarning != nil ? plan.source.color.primaries : nil) {
-                        Toggle(isOn: $hdr.convertGamut) { Text("Convert \(ColorLUT.label(from)) → BT.2020 (recommended)") }.disabled(project.busy)
-                        Label(plan.gamutWarning ?? "The source is \(ColorLUT.label(from)). HDR10 and Dolby Vision streams are BT.2020: the picture is converted in linear light, the matrix becomes BT.2020 and the chroma siting UHD. The colours don't change — BT.2020 is the container they travel in. The mastering display stays \(ColorLUT.label(from)).",
-                              systemImage: plan.gamutWarning == nil ? "checkmark.circle" : "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(plan.gamutWarning == nil ? Color.secondary : Color.orange).fixedSize(horizontal: false, vertical: true)
+                        Toggle(isOn: $hdr.convertGamut) {
+                            Text("Convert \(ColorLUT.label(from)) → BT.2020 (recommended)").font(CryoFont.body(12)).foregroundStyle(Cryo.ink)
+                        }
+                        .toggleStyle(CryoToggleStyle()).disabled(project.busy)
+                        VideoNote(symbol: plan.gamutWarning == nil ? "checkmark.circle" : "exclamationmark.triangle.fill",
+                                  color: plan.gamutWarning == nil ? Cryo.ink2 : Cryo.attention,
+                                  text: plan.gamutWarning ?? "The source is \(ColorLUT.label(from)). HDR10 and Dolby Vision streams are BT.2020: the picture is converted in linear light, the matrix becomes BT.2020 and the chroma siting UHD. The colours don't change — BT.2020 is the container they travel in. The mastering display stays \(ColorLUT.label(from)).")
                     }
-                } else if v == nil {
-                    Label("Add the picture (IMF package, or an HDR ProRes/MXF file).", systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+                } else if project.videoSource == nil {
+                    VideoNote(symbol: "exclamationmark.triangle.fill", color: Cryo.attention, text: "Add the picture (IMF package, or an HDR ProRes/MXF file).")
                 }
             }
-        } header: {
-            Text("HDR · Dolby Vision · HDR10+")
-        } footer: {
-            Text(hdr.encode
-                 ? "The picture is re-encoded to HEVC 10-bit — the only way Dolby Vision, HDR10+ and HDR10 play on TVs, Apple TV, iPhone and Mac. The audio stays bit-exact."
-                 : "Masters (ProRes, JPEG 2000, IMF) don't play on TVs or Apple devices. Turn this on to make a playback version: HEVC 10-bit with Dolby Vision, HDR10 and HDR10+.")
         }
     }
 
-    func metaLine(_ title: String, detail: String?, bad: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).lineLimit(1).truncationMode(.middle)
+    /// One metadata file: what it is, what was read, and Choose / Change / Remove (removing says so on the card)
+    func metadataRow(kind: VideoPlanModel.MetadataKind, file: String?, detail: String?, bad: Bool, empty: String) -> some View {
+        let video = project.video
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                VideoMetadataLogo(kind: kind, height: 11)
+                Spacer(minLength: 6)
+                if file != nil {
+                    Button("Analysis…") { video.present(.metadata(kind)) }.buttonStyle(CryoButtonStyle())
+                    Button("Remove") { video.removeMetadata(project: project) }.buttonStyle(CryoButtonStyle(tint: Cryo.ink2))
+                }
+                Button(file == nil ? "Choose…" : "Change…") { choose(kind) }.buttonStyle(CryoButtonStyle())
+            }
+            .disabled(project.busy)
+            Text(file ?? empty).font(CryoFont.body(11.5)).foregroundStyle(file == nil ? Cryo.ink3 : Cryo.ink).lineLimit(2).truncationMode(.middle)
             if let detail, !detail.isEmpty {
-                Text(detail).font(.caption2).foregroundStyle(bad ? Color.orange : Color.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(detail).font(CryoFont.body(10.5)).foregroundStyle(bad ? Cryo.attention : Cryo.ink2).fixedSize(horizontal: false, vertical: true)
             }
         }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Cryo.s0.opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Cryo.s3, lineWidth: 1))
+    }
+
+    /// The file picker lives in the view; the plan reads what was chosen (and opens its analysis)
+    func choose(_ kind: VideoPlanModel.MetadataKind) {
+        let p = NSOpenPanel()
+        if kind == .dolbyVision {
+            p.allowedContentTypes = [.xml, UTType(filenameExtension: "mxf") ?? .data]
+            p.message = "Choose the Dolby Vision metadata: the XML exported from DaVinci Resolve, or an IMF DOLBY_….mxf"
+        } else {
+            p.allowedContentTypes = [.json]
+            p.message = "Choose the HDR10+ metadata (JSON — e.g. exported from DaVinci Resolve Studio)"
+        }
+        guard p.runModal() == .OK, let u = p.url else { return }
+        project.video.didAddMetadata(kind: kind, url: u, project: project)
     }
 }
 
@@ -95,12 +121,14 @@ struct PlaybackPanel: View {
     var body: some View {
         let audio = project.included.filter { $0.kind == .audio }
         let hdr = project.videoTrack?.mi?["HDR_Format"] ?? ""
-        PlaybackRows(dolbyVision: project.encodePlan?.hdr?.dolbyVision != nil || hdr.contains("Dolby Vision"),
-                     hdr10plus: project.encodePlan?.hdr?.hdr10plus != nil || hdr.contains("2094"),
-                     atmosDDP: audio.contains { $0.codecKey == "eac3" && $0.isAtmos },
-                     trueHD: audio.contains { $0.codecKey == "truehd" || $0.codecKey == "mlp" },
-                     mkv: project.container == .mkv)
-        Text("Not for the Academy: it asks for SDR (ProRes 422 HQ / H.264).").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            PlaybackRows(dolbyVision: project.encodePlan?.hdr?.dolbyVision != nil || hdr.contains("Dolby Vision"),
+                         hdr10plus: project.encodePlan?.hdr?.hdr10plus != nil || hdr.contains("2094"),
+                         atmosDDP: audio.contains { $0.codecKey == "eac3" && $0.isAtmos },
+                         trueHD: audio.contains { $0.codecKey == "truehd" || $0.codecKey == "mlp" },
+                         mkv: project.container == .mkv)
+            Text("Not for the Academy: it asks for SDR (ProRes 422 HQ / H.264).").font(CryoFont.body(11)).foregroundStyle(Cryo.ink3)
+        }
     }
 }
 
@@ -120,18 +148,27 @@ struct HDRFileCard: View {
         let audios = tracks.filter { $0.type == "Audio" }
         let formats = [hdr.contains("Dolby Vision") ? "Dolby Vision" : nil, hdr.contains("2086") || v?["transfer_characteristics"] == "PQ" ? "HDR10" : nil,
                        hdr.contains("2094") ? "HDR10+" : nil, v?["transfer_characteristics"] == "HLG" ? "HLG" : nil].compactMap { $0 }
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
-                IconTile(symbol: "sun.max.fill", color: .orange, size: 40)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("HDR playback file").font(.headline)
-                    Text(formats.joined(separator: " + ")).font(.subheadline).foregroundStyle(.secondary)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Cryo.s2)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Cryo.s3, lineWidth: 1)
+                    Image(systemName: "sun.max").font(.system(size: 18, weight: .semibold)).foregroundStyle(Cryo.ice)
+                }
+                .frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("HDR playback file").font(CryoFont.title(15)).foregroundStyle(Cryo.ink)
+                    HStack(spacing: 8) {
+                        if hdr.contains("Dolby Vision") { DolbyVisionLogo(height: 11) }
+                        if hdr.contains("2094") { HDR10PlusLogo(height: 11) }
+                        Text(formats.joined(separator: " + ")).font(CryoFont.body(12)).foregroundStyle(Cryo.ink2)
+                    }
                 }
             }
             PlaybackRows(dolbyVision: hdr.contains("Dolby Vision"), hdr10plus: hdr.contains("2094"),
                          atmosDDP: audios.contains { Academy.isEAC3JOC($0) }, trueHD: audios.contains { Academy.isTrueHD($0) },
                          mkv: tracks.first { $0.type == "General" }?["Format"] == "Matroska")
-            Text("The Academy checks below are for SDR deliveries — they don't apply to this file.").font(.caption).foregroundStyle(.secondary)
+            Text("The Academy checks below are for SDR deliveries — they don't apply to this file.").font(CryoFont.body(11)).foregroundStyle(Cryo.ink3)
         }
         .padding(.vertical, 4)
     }
@@ -145,7 +182,7 @@ struct PlaybackRows: View {
     let mkv: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             row("Apple TV 4K · iPhone · iPad · Mac", mkv ? "no — Apple doesn't open MKV (Infuse does)" :
                     [dolbyVision ? "Dolby Vision" : "HDR10", atmosDDP ? "Atmos (E-AC-3)" : trueHD ? "no TrueHD on Apple" : "audio"].joined(separator: " · "), good: !mkv)
             row("LG · Sony · Philips TVs (USB)", [dolbyVision ? "Dolby Vision" : "HDR10", atmosDDP || trueHD ? "Atmos to the soundbar (eARC)" : "audio"].joined(separator: " · "), good: true)
@@ -156,78 +193,78 @@ struct PlaybackRows: View {
     }
 
     func row(_ device: String, _ what: String, good: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: good ? "checkmark.circle.fill" : "minus.circle.fill").foregroundStyle(good ? Color.green : Color.secondary)
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: good ? "checkmark.circle.fill" : "minus.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(good ? Cryo.pass : Cryo.ink3)
+                .accessibilityLabel(good ? "plays" : "partly or not")
             VStack(alignment: .leading, spacing: 1) {
-                Text(device).font(.subheadline.weight(.medium))
-                Text(what).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(device).font(CryoFont.body(12).weight(.medium)).foregroundStyle(Cryo.ink)
+                Text(what).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 }
 
-/// Bitrate control of the HEVC encode: the mode (CRF / 2-pass / CBR), the quality level or the target, the quality floor.
-/// Shared by the Mux's HDR panel and the Transcode inspector.
+/// Bitrate control of the HEVC encode: the mode (CRF / 2-pass / CBR), the quality level or the target preset, the
+/// quality floor. Shared by the Video tab's transcode settings and the inspector's HDR panel.
 struct RateControlRows: View {
     @Bindable var hdr: HDRSettings
-    var showsQuality: Bool          // the Transcode inspector has its own Quality picker (shared with H.264)
+    var showsQuality: Bool          // false where the caller shows its own Quality (an SDR HEVC keeps it in its settings)
     var disabled: Bool
 
     var body: some View {
-        Picker(selection: $hdr.rateMode) {
-            ForEach(HDRSettings.RateMode.allCases) { Text($0.label).tag($0) }
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Bitrate")
-                Text(hdr.rateMode.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                CryoFieldLabel("Mode")
+                VideoPickChips(selection: $hdr.rateMode, options: HDRSettings.RateMode.allCases.map { (value: $0, label: $0.label) }, disabled: disabled)
+                Text(hdr.rateMode.detail).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
             }
-        }
-        .disabled(disabled)
-        if hdr.rateMode == .quality {
-            if showsQuality {
-                Picker(selection: $hdr.quality) {
-                    ForEach(HDRSettings.Quality.allCases) { Text($0.label).tag($0) }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Quality")
-                        Text(hdr.quality.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if hdr.rateMode == .quality {
+                if showsQuality {
+                    VStack(alignment: .leading, spacing: 6) {
+                        CryoFieldLabel("Quality")
+                        VideoPickChips(selection: $hdr.quality, options: HDRSettings.Quality.allCases.map { (value: $0, label: $0.label) }, disabled: disabled)
+                        Text(hdr.quality.detail).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .disabled(disabled)
-            }
-        } else {
-            Picker(selection: $hdr.bitratePreset) {
-                ForEach(HDRSettings.BitratePreset.allCases) { Text($0.label).tag($0) }
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Target")
-                    Text(hdr.bitratePreset.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    CryoFieldLabel("Preset")
+                    VideoPickChips(selection: $hdr.bitratePreset, options: HDRSettings.BitratePreset.allCases.map { (value: $0, label: $0 == .custom ? "Custom" : $0.label) }, disabled: disabled)
+                    Text(hdr.bitratePreset.detail).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
                 }
-            }
-            .disabled(disabled)
-            if hdr.bitratePreset == .custom {
-                LabeledContent(hdr.rateMode == .average ? "Average" : "Bitrate") {
-                    HStack(spacing: 4) {
-                        TextField("", value: $hdr.customMbps, format: .number).textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
-                        Text("Mbps")
-                    }
-                }
-                .disabled(disabled)
-                if hdr.rateMode == .average {
-                    LabeledContent("Peak") {
-                        HStack(spacing: 4) {
-                            TextField("", value: $hdr.customMaxMbps, format: .number).textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
-                            Text("Mbps")
-                        }
+                if hdr.bitratePreset == .custom {
+                    HStack(spacing: 18) {
+                        mbpsField(hdr.rateMode == .average ? "Average" : "Bitrate", value: $hdr.customMbps)
+                        if hdr.rateMode == .average { mbpsField("Peak", value: $hdr.customMaxMbps) }
                     }
                     .disabled(disabled)
                 }
+                Toggle(isOn: $hdr.qualityFloor) {
+                    Text("Quality floor — no frame worse than QP \(HDRSettings.Rate.floorQP), however easy the scene").font(CryoFont.body(12)).foregroundStyle(Cryo.ink)
+                }
+                .toggleStyle(CryoToggleStyle()).disabled(disabled)
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    if hdr.rate.beyondLevel51 {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(Cryo.attention)
+                    }
+                    Text(hdr.rate.summary).font(CryoFont.body(11)).foregroundStyle(hdr.rate.beyondLevel51 ? Cryo.attention : Cryo.ink2).fixedSize(horizontal: false, vertical: true)
+                }
             }
-            Toggle(isOn: $hdr.qualityFloor) {
-                Text("Quality floor — no frame worse than QP \(HDRSettings.Rate.floorQP), however easy the scene")
+        }
+    }
+
+    func mbpsField(_ label: String, value: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            CryoFieldLabel(label)
+            HStack(spacing: 6) {
+                TextField("", value: value, format: .number)
+                    .textFieldStyle(.plain).font(CryoFont.mono(12)).foregroundStyle(Cryo.ink)
+                    .multilineTextAlignment(.trailing).frame(width: 56)
+                    .cryoField()
+                Text("Mbps").font(CryoFont.body(11.5)).foregroundStyle(Cryo.ink2)
             }
-            .toggleStyle(.checkbox).disabled(disabled)
-            Text(hdr.rate.summary).font(.caption).foregroundStyle(hdr.rate.beyondLevel51 ? Color.orange : Color.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }
