@@ -1,6 +1,7 @@
-// BROS-MUX — design system. One 8-pt grid, the system type ramp (no ad-hoc sizes), system materials and
-// semantic colours. The accent colour is the system accent; colour otherwise only carries meaning
-// (pass / warning / failure, the kind of a track). Everything else is monochrome, like a Mac app.
+// BROS-MUX — design system: spacing (DS) and the shared small pieces, drawn in the Cryo language (Cryo.swift).
+// One 8-pt grid. The APIs below are the ones every screen already uses; only their look is Cryo: opaque recessed
+// groups, caps labels, etched chips, status colours with an icon and a word, code on the slab. Colour only carries
+// meaning — a system colour handed to these pieces is turned into its Cryo token (Cryo.mapped).
 
 import SwiftUI
 import AppKit
@@ -17,8 +18,8 @@ enum DS {
     static let margin: CGFloat = 16          // content edge
     static let gap: CGFloat = 12             // between groups
     static let rowGap: CGFloat = 8           // inside a group
-    static let radius: CGFloat = 10          // grouped containers
-    static let tile: CGFloat = 28            // Settings-style icon tile
+    static let radius: CGFloat = 12          // grouped containers
+    static let tile: CGFloat = 28            // icon tile
     static let inspectorWidth: CGFloat = 400
     static let sidebarWidth: CGFloat = 200
 
@@ -29,30 +30,31 @@ enum DS {
         return CGSize(width: min(width, screen.width - 48), height: min(height, screen.height - 48))
     }
 
-    /// Fill of a grouped container in a free layout: white-ish in light mode, one step lighter than the window in dark mode
-    static let groupFill = Color(nsColor: NSColor(name: nil) { a in
-        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.06) : NSColor(white: 1, alpha: 0.85)
-    })
-    /// Hairline around a grouped container
-    static let groupStroke = Color(nsColor: NSColor(name: nil) { a in
-        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.10) : NSColor(white: 0, alpha: 0.08)
-    })
-    /// Background of waveform and chart canvases (content layer, always dark like a scope)
-    static let scope = Color(red: 0.09, green: 0.10, blue: 0.12)
+    /// Fill of a grouped container in a free layout: the recessed slot (opaque, below the slab)
+    static let groupFill = Color(.sRGB, red: 0x06 / 255.0, green: 0x0E / 255.0, blue: 0x15 / 255.0, opacity: 1)
+    /// Hairline around a grouped container: a faint ice edge
+    static let groupStroke = Color(.sRGB, red: 0x8C / 255.0, green: 0xDC / 255.0, blue: 0xFF / 255.0, opacity: 0.10)
+    /// Background of waveform and chart canvases (content layer, a neutral dark ground like a scope — no cyan behind data)
+    static let scope = Cryo.scope
 }
 
 // MARK: - Containers
 
-/// A titled, rounded container with the look of a grouped Form section, for free layouts
+/// A titled, rounded container: a caps label over an opaque recessed slot, for free layouts
 struct InsetGroupStyle: GroupBoxStyle {
     func makeBody(configuration: Configuration) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            configuration.label.font(.headline).padding(.leading, 2)
+        let shape = RoundedRectangle(cornerRadius: DS.radius + 2, style: .continuous)
+        VStack(alignment: .leading, spacing: 8) {
+            configuration.label
+                .font(CryoFont.label(10.5)).tracking(2).textCase(.uppercase)
+                .foregroundStyle(Cryo.ink3)
+                .padding(.leading, 4)
+                .accessibilityAddTraits(.isHeader)
             configuration.content
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
-                .background(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).fill(DS.groupFill))
-                .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(DS.groupStroke, lineWidth: 1))
+                .background(shape.fill(Cryo.recess.shadow(.inner(color: .black.opacity(0.85), radius: 8, y: 6))))
+                .overlay(shape.strokeBorder(DS.groupStroke, lineWidth: 1))
         }
     }
 }
@@ -60,89 +62,98 @@ extension GroupBoxStyle where Self == InsetGroupStyle {
     static var inset: InsetGroupStyle { InsetGroupStyle() }
 }
 
-/// Inline notice (information, warning or failure) placed next to what it describes
+/// Inline notice (information, warning or failure) placed next to what it describes: an opaque plate tinted by the
+/// status, with its icon and its word (PASS / ATTENTION / FAIL) — never colour alone
 struct NoticeRow: View {
     let text: String
     var level: CheckLevel = .info
     var body: some View {
-        Label {
-            Text(text).font(.callout).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-        } icon: {
-            Image(systemName: level.icon).foregroundStyle(level.color)
+        let c = Cryo.status(level)
+        let shape = RoundedRectangle(cornerRadius: DS.radius, style: .continuous)
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: level.icon).foregroundStyle(c).accessibilityHidden(true)
+            if let w = Cryo.word(level) {
+                Text(w).font(CryoFont.label(9.5)).tracking(1.2).foregroundStyle(c).fixedSize()
+            }
+            Text(text).font(CryoFont.body(12.5)).foregroundStyle(Cryo.ink)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
-        .padding(.horizontal, 12).padding(.vertical, 9)
+        .padding(.leading, 14).padding(.trailing, 12).padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).fill(level.color.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(level.color.opacity(0.22), lineWidth: 1))
+        .background(shape.fill(Cryo.mix(Cryo.s1, c, level == .info ? 0.03 : 0.08)))
+        .overlay(alignment: .leading) { Rectangle().fill(c.opacity(level == .info ? 0.5 : 0.9)).frame(width: 3).accessibilityHidden(true) }
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(c.opacity(level == .info ? 0.18 : 0.35), lineWidth: 1))
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// The fixed strip at the top of a tab: what this tab does, and nothing else
+/// The fixed strip at the top of a tab: what this tab does, and nothing else (the old two-tab strip, drawn as a Cryo
+/// plate: an amber tint means the file is re-encoded)
 struct TabStrip: View {
     let symbol: String
     let title: String
     let text: String
     let tint: Color
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: symbol).foregroundStyle(tint)
-                Text(title).fontWeight(.semibold)
-                Text(text).foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-            }
-            .font(.callout)
-            .lineLimit(2)
-            .padding(.horizontal, DS.margin).padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(tint.opacity(0.08))
-            Divider()
-        }
-        .accessibilityElement(children: .combine)
+        let mapped = Cryo.mapped(tint)
+        let touch: FileTouch = mapped == Cryo.attention ? .transcode : (mapped == Cryo.info || mapped == Cryo.ink2 ? .readOnly : .copy)
+        CryoPlateRow(touch: touch, title: title.trimmingCharacters(in: CharacterSet(charactersIn: " ·")), text: text, symbol: symbol) { EmptyView() }
+            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 6)
     }
-    static let mux = TabStrip(symbol: "checkmark.seal.fill", title: "Mux ·", text: "nothing is re-encoded — picture and sound go in and out bit for bit; tracks are only combined.", tint: .green)
-    static let transcode = TabStrip(symbol: "arrow.triangle.2.circlepath", title: "Transcode ·", text: "the file is re-encoded — codec, quality, size, resolution and colour can change. The original is never touched; a new file is always written.", tint: .orange)
+    static let mux = TabStrip(symbol: "checkmark.seal.fill", title: "Mux ·", text: "nothing is re-encoded — picture and sound go in and out bit for bit; tracks are only combined.", tint: Cryo.ice)
+    static let transcode = TabStrip(symbol: "arrow.triangle.2.circlepath", title: "Transcode ·", text: "the file is re-encoded — codec, quality, size, resolution and colour can change. The original is never touched; a new file is always written.", tint: Cryo.attention)
 }
 
 // MARK: - Small pieces
 
-/// Settings-style icon tile: a white symbol on a coloured rounded square
+/// Icon tile: an etched dark square lit from inside by its colour (no Settings-style coloured squares)
 struct IconTile: View {
     let symbol: String
     let color: Color
     var size: CGFloat = DS.tile
+    var lit: Color { Cryo.mapped(color) }
+    var glow: RadialGradient {
+        RadialGradient(colors: [lit.opacity(0.28), lit.opacity(0.08)], center: UnitPoint(x: 0.5, y: 0.3), startRadius: 0, endRadius: size * 0.8)
+    }
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
         Image(systemName: symbol)
-            .font(.body.weight(.medium))
-            .imageScale(size > 32 ? .large : .medium)
-            .foregroundStyle(.white)
+            .font(.system(size: size * 0.46, weight: .medium))
+            .foregroundStyle(Cryo.mix(lit, .white, 0.25))
             .frame(width: size, height: size)
-            .background(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous).fill(color.gradient))
+            .background(shape.fill(glow))
+            .background(shape.fill(Cryo.s2))
+            .overlay(shape.strokeBorder(lit.opacity(0.45), lineWidth: 1))
             .accessibilityHidden(true)
     }
 }
 
-/// Small capsule tag; monochrome unless it carries a state
+/// Small etched tag; monochrome unless it carries a state (a system colour becomes its Cryo token)
 struct Chip: View {
     let text: String
     var tint: Color? = nil
     var body: some View {
+        let c = tint.map(Cryo.mapped) ?? Cryo.ink2
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
         Text(text)
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .foregroundStyle(tint ?? Color.secondary)
-            .background(Capsule().fill((tint ?? Color.secondary).opacity(0.12)))
+            .font(CryoFont.label(10)).tracking(0.6)
+            .padding(.horizontal, 7).frame(minHeight: 19)
+            .foregroundStyle(c)
+            .background(shape.fill(tint == nil ? Color.white.opacity(0.05) : c.opacity(0.11)))
+            .overlay(shape.strokeBorder(tint == nil ? Color.white.opacity(0.10) : c.opacity(0.38), lineWidth: 1))
             .fixedSize()
     }
 }
 
-/// Monospaced read-only text (logs, commands, reports) on the text background.
+/// Monospaced read-only text (logs, commands, reports) on the slab, in the code colour.
 /// On a page that scrolls itself (a Form, the inspector) pass `scrolls: false`: the box then grows and wraps with its
 /// text, because a scroll view nested in a scrolling page swallows the wheel whenever the cursor is over it.
 struct TerminalBox: View {
     let text: String
     var scrolls = true
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         Group {
             if scrolls {
                 ScrollView([.vertical, .horizontal]) { content }
@@ -150,16 +161,18 @@ struct TerminalBox: View {
                 content.fixedSize(horizontal: false, vertical: true)
             }
         }
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(DS.groupStroke, lineWidth: 1))
+        .background(shape.fill(Color(.sRGB, red: 0x02 / 255.0, green: 0x05 / 255.0, blue: 0x08 / 255.0, opacity: 1)))
+        .overlay(shape.strokeBorder(Cryo.ice.opacity(0.10), lineWidth: 1))
     }
 
     var content: some View {
         Text(text.isEmpty ? " " : text)
-            .font(.system(.caption, design: .monospaced))
+            .font(CryoFont.mono(11))
+            .lineSpacing(3)
+            .foregroundStyle(Cryo.codeText)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
+            .padding(12)
     }
 }
 
@@ -178,27 +191,27 @@ struct KeyValueRow: View {
     var chip: String? = nil
     var chipTint: Color? = nil
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(label).font(.subheadline.weight(.medium))
+                Text(label).font(CryoFont.body(12.5, weight: .semibold)).foregroundStyle(Cryo.ink)
                 Spacer(minLength: 8)
                 if let chip { Chip(text: chip, tint: chipTint) }
             }
-            Text(value).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            Text(value).font(CryoFont.body(11.5)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
     }
 }
 
-/// Title of a sheet: title, optional subtitle, controls on the trailing side
+/// Title of a sheet: an expanded title, an optional subtitle in mono, controls on the trailing side
 struct SheetHeader<Accessory: View>: View {
     let title: String
     var subtitle: String? = nil
     @ViewBuilder var accessory: () -> Accessory
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.title2.weight(.semibold))
-                if let subtitle { Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(CryoFont.title(22)).tracking(0.5).foregroundStyle(Cryo.ink).accessibilityAddTraits(.isHeader)
+                if let subtitle { Text(subtitle).font(CryoFont.mono(11.5)).foregroundStyle(Cryo.ink2).lineLimit(1).truncationMode(.middle) }
             }
             Spacer(minLength: 12)
             accessory()
@@ -207,11 +220,15 @@ struct SheetHeader<Accessory: View>: View {
     }
 }
 
-/// Buttons at the bottom trailing corner of a sheet
+/// Buttons at the bottom trailing corner of a sheet, under a faint ice rule
 struct SheetButtons<Content: View>: View {
     @ViewBuilder var content: () -> Content
     var body: some View {
         HStack(spacing: 10) { Spacer(); content() }
             .padding(.horizontal, 20).padding(.vertical, 14)
+            .overlay(alignment: .top) {
+                Rectangle().fill(LinearGradient(colors: [Cryo.ice.opacity(0), Cryo.ice.opacity(0.18), Cryo.ice.opacity(0)], startPoint: .leading, endPoint: .trailing))
+                    .frame(height: 1).padding(.horizontal, 20).accessibilityHidden(true)
+            }
     }
 }
