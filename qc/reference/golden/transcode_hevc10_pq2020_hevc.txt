@@ -1,0 +1,24 @@
+SOURCE: hevc10_pq2020.mov · HEVC Main 10 · 10-bit 4:2:0 · 11.3 Mbps · 1920×1080 @ 24 fps · 120 frames · colour BT.2020 / PQ / BT.2020 nc · limited range · TC 01:00:00:00
+TARGET: HEVC Main 10 · 10-bit 4:2:0 · 1920×1080 · colour BT.2020 / PQ / BT.2020 nc · limited range · BT.2020 · PQ · audio AAC · MP4 · encoder libx265
+  → HDR: SMPTE ST 2086 → BT.2020 · PQ (no HDR10 metadata)
+  → Bitrate: 11.3 Mbps → ~10.0 Mbps
+  → Audio: PCM 24-bit Stereo → AAC 256 kbps, Stereo
+  → Container: MOV → MP4
+  ⚠ The source is HDR (BT.2020 · PQ): the HEVC keeps its PQ/HLG tags but carries no HDR10 metadata. Choose the Dolby Vision / HDR preset for a proper HDR file.
+  ⚠ PCM audio doesn't go into MP4: the audio is encoded to AAC instead (or choose MOV to keep it).
+ESTIMATE: ~6,3 MB · about 4 s of encoding
+COMMAND: ffmpeg -nostdin -v error -nostats -progress pipe:1 -i ./qc/out/clips/hevc10_pq2020.mov -map 0:v:0 -frames:v 120 -map 0:a? -c:a aac_at -b:a 256k -sn -dn -vf scale=out_range=tv:out_h_chr_pos=0:out_v_chr_pos=0:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=yuv420p10le -c:v libx265 -preset medium -crf 16 -x265-params log-level=error:psy-rd=2.0:psy-rdoq=1.0:rdoq-level=2:b-intra=1:weightb=1:repeat-headers=1:aud=1:hrd=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:chromaloc=2:vbv-maxrate=70000:vbv-bufsize=70000:aq-mode=3:no-sao=1 -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -tag:v hvc1 -timecode 01:00:00:00 -r 24/1 -y ./qc/out/transcode/hevc10_pq2020_hevc.mp4
+
+
+RESULT (N s): ok
+  • Picture: RE-ENCODED (HEVC → HEVC Main 10) · libx265 · 120 frames in N s
+  • Frames: 120 (source 120) ✓
+  • Duration: 00:00:05.000 (source 00:00:05.000) ✓
+  • Codec: HEVC Main 10 · 10-bit 4:2:0 · 1920×1080 · 24.000 fps · 14.6 Mbps
+  • Colour tags: BT.2020 / PQ / BT.2020 non-constant (primaries / transfer / matrix) ✓
+  • Timecode: 01:00:00:00 (source 01:00:00:00) ✓
+  • Audio: 1 track (AAC) ✓
+  • Render QC: no render faults found in 120 frames ✓
+
+ACADEMY SEAL (on the result): 🔴 NOT APPROVED BY THE ACADEMY
+ZIDOO: 🟡 SHOULD PLAY ON THE ZIDOO

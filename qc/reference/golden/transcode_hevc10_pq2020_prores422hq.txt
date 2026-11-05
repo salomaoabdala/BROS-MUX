@@ -1,0 +1,24 @@
+SOURCE: hevc10_pq2020.mov · HEVC Main 10 · 10-bit 4:2:0 · 11.3 Mbps · 1920×1080 @ 24 fps · 120 frames · colour BT.2020 / PQ / BT.2020 nc · limited range · TC 01:00:00:00
+TARGET: Apple ProRes 422 HQ · 10-bit 4:2:2 · 1920×1080 · colour BT.2020 / PQ / BT.2020 nc · limited range · BT.2020 · PQ · audio Copy (bit for bit) · MOV · encoder prores_videotoolbox
+  → Codec: HEVC Main 10 → Apple ProRes 422 HQ
+  → Chroma: 4:2:0 → 4:2:2
+  → HDR: SMPTE ST 2086 → BT.2020 · PQ (no HDR10 metadata)
+  → Bitrate: 11.3 Mbps → ~141.3 Mbps
+  → Audio: PCM 24-bit Stereo → PCM 24-bit Stereo (bit for bit)
+  ⚠ ProRes 422 HQ HDR: the Academy wants SDR BT.709 — this is a master copy, not a screening file.
+ESTIMATE: ~88,3 MB · about 0 s of encoding
+COMMAND: ffmpeg -nostdin -v error -nostats -progress pipe:1 -i ./qc/out/clips/hevc10_pq2020.mov -map 0:v:0 -frames:v 120 -map 0:a? -c:a copy -sn -dn -vf scale=out_range=tv:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=p210le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv -c:v prores_videotoolbox -profile:v hq -allow_sw 1 -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv -timecode 01:00:00:00 -r 24/1 -y ./qc/out/transcode/hevc10_pq2020_prores422hq.mov
+
+
+RESULT (N s): ok
+  • Picture: RE-ENCODED (HEVC → Apple ProRes 422 HQ) · prores_videotoolbox · 120 frames in N s
+  • Frames: 120 (source 120) ✓
+  • Duration: 00:00:05.000 (source 00:00:05.000) ✓
+  • Codec: ProRes 422 HQ · 10-bit 4:2:2 · 1920×1080 · 24.000 fps · 109.0 Mbps
+  • Colour tags: BT.2020 / PQ / BT.2020 non-constant (primaries / transfer / matrix) ✓
+  • Timecode: 01:00:00:00 (source 01:00:00:00) ✓
+  • Audio: 1 track (copied bit for bit) ✓
+  • Render QC: no render faults found in 120 frames ✓
+
+ACADEMY SEAL (on the result): 🔴 NOT APPROVED BY THE ACADEMY
+ZIDOO: 🔴 NOT SUPPORTED ON THE ZIDOO

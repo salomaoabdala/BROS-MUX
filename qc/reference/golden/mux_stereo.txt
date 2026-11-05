@@ -1,0 +1,34 @@
+
+TRACKS:
+  [x] Video: H.264 / AVC |  | Video | und
+  [x] Timecode: Timecode (QuickTime) |  | Timecode | eng
+  [x] Audio: PCM 24-bit | Stereo | PCM Stereo | und
+  [ ] Audio: PCM 24-bit | Stereo | PCM Stereo | und | SYNC REFERENCE
+
+PREDICTED ACADEMY SEAL: 🟡 ACCEPTED SPECS
+
+COMMAND: MP4Box -add ./qc/out/clips/h264_709.mov#trackID=1:lang=und:name=Video:disable=no -add ./qc/out/clips/h264_709.mov#trackID=3:name=Timecode:disable=no -add "./qc/out/clips/guide.wav:lang=und:name=PCM Stereo:group=1:disable=no" -inter 500 -moovpad 4096 -tmp ./qc/out/mux/.BROS-MUX-tmp -new ./qc/out/mux/stereo.mov
+
+
+RESULT (N s): ok
+  • Picture: bit-exact copy (H.264 / AVC)
+  • Audio 1: channel labels written (L R)
+  • Audio “PCM Stereo”: bit-identical ✓ (3,5 MB)
+  • Sync “PCM Stereo” vs reference: -0.00 ms (exact sync) · 9/9 points ✓
+
+ACADEMY SEAL (verified): 🟡 ACCEPTED SPECS
+  [PASS] File name: Only legal characters ([A-Za-z0-9._-])
+  [PASS] Video codec: AVC/H.264 Constrained Baseline (MOV) — ACCEPTED
+  [PASS] Resolution: 1920×1080 (HD)
+  [PASS] Frame rate: 24.000 fps
+  [INFO] Forensic watermarking: 24.000 fps — films purchasing forensic watermarking must be 23.976 or 29.97 fps
+  [PASS] Scan type: Progressive
+  [PASS] Color primaries: BT.709
+  [PASS] Transfer function: BT.709
+  [PASS] YCbCr matrix: BT.709
+  [WARN] Video bitrate: 18.6 Mbps (H.264 HD: 40 Mbps or higher)
+  [PASS] Audio 1 · PCM: 24-bit · 48 kHz · 2 ch (lossless 16/24-bit 48 kHz required)
+  [PASS] Audio 1 · Channel mapping: L R
+  [PASS] Audio 1 vs video length: Match (+0 ms)
+  [INFO] Loudness: -27 LKFS ±2 dialogue-gated and -2 dBTP are requested; the Academy may adjust levels (not part of the seal)
+  [PASS] Apple QuickTime compatibility: AVFoundation sees every track (1 video, 1 audio) and can play the file

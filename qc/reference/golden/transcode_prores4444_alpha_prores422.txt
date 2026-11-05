@@ -1,0 +1,27 @@
+SOURCE: prores4444_alpha.mov · Apple ProRes 4444 · 12-bit 4:4:4 + alpha · 112.1 Mbps · 1920×1080 @ 24 fps · 288 frames · colour BT.709 / BT.709 / BT.709 · limited range · TC 01:00:00:00
+TARGET: Apple ProRes 422 · 10-bit 4:2:2 · 1920×1080 · colour BT.709 / BT.709 / BT.709 · limited range · SDR · audio Copy (bit for bit) · MOV · encoder prores_videotoolbox
+  → Codec: Apple ProRes 4444 → Apple ProRes 422
+  → Bit depth: 12-bit → 10-bit
+  → Chroma: 4:4:4 → 4:2:2
+  → Alpha: yes → discarded
+  → Bitrate: 112.1 Mbps → ~94.1 Mbps
+  → Audio: PCM 24-bit Stereo → PCM 24-bit Stereo (bit for bit)
+  ⚠ The alpha channel of the source is discarded (ProRes 422 carries no alpha).
+  ⚠ Colour goes from 4:4:4 to 4:2:2: chroma is subsampled.
+  ⚠ 12 → 10 bits.
+ESTIMATE: ~141,1 MB · about 1 s of encoding
+COMMAND: ffmpeg -nostdin -v error -nostats -progress pipe:1 -i ./qc/out/clips/prores4444_alpha.mov -map 0:v:0 -frames:v 288 -map 0:a? -c:a copy -sn -dn -vf scale=out_range=tv:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=p210le,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv -c:v prores_videotoolbox -profile:v standard -allow_sw 1 -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv -timecode 01:00:00:00 -r 24/1 -y ./qc/out/transcode/prores4444_alpha_prores422.mov
+
+
+RESULT (N s): ok
+  • Picture: RE-ENCODED (Apple ProRes 4444 → Apple ProRes 422) · prores_videotoolbox · 288 frames in N s
+  • Frames: 288 (source 288) ✓
+  • Duration: 00:00:12.000 (source 00:00:12.000) ✓
+  • Codec: ProRes 422 · 10-bit 4:2:2 · 1920×1080 · 24.000 fps · 62.0 Mbps
+  • Colour tags: BT.709 / BT.709 / BT.709 (primaries / transfer / matrix) ✓
+  • Timecode: 01:00:00:00 (source 01:00:00:00) ✓
+  • Audio: 1 track (copied bit for bit) ✓
+  • Render QC: no render faults found in 288 frames ✓
+
+ACADEMY SEAL (on the result): 🟡 ACCEPTED SPECS
+ZIDOO: 🔴 NOT SUPPORTED ON THE ZIDOO

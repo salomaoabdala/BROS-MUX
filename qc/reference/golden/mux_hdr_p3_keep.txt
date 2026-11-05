@@ -1,0 +1,36 @@
+
+TRACKS:
+  [x] Video: Apple ProRes 4444 | HDR · PQ | Video | und
+  [x] Timecode: Timecode (QuickTime) |  | Timecode | eng
+  [ ] Audio: PCM 24-bit | Stereo | PCM Stereo | und | SYNC REFERENCE
+
+PREDICTED ACADEMY SEAL: 🔴 NOT APPROVED BY THE ACADEMY
+
+ENCODE: HDR10 · 120 frames @ 24 · 1920×1080 · libx265 slow · quality Maximum · colour Display P3 / PQ / BT.709 · limited range · WARNING: The source is P3-D65; HDR10 and Dolby Vision streams are BT.2020. The output stays tagged Display P3 / PQ / BT.709 · limited range — players that assume BT.2020 will shift the hues. Turn the BT.2020 conversion on (recommended). · HDR10 P3-D65 · 0.0001–1000 nits, MaxCLL 0, MaxFALL 0
+
+COMMAND: ffmpeg -nostdin -v error -nostats -progress pipe:1 -i ./qc/out/clips/prores4444_p3pq.mov -map 0:v:0 -frames:v 120 -an -sn -dn -vf scale=out_range=tv:flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=yuv420p10le -c:v libx265 -preset slow -crf 14 -x265-params log-level=error:psy-rd=2.0:psy-rdoq=1.0:rdoq-level=2:b-intra=1:weightb=1:hdr10=1:hdr10-opt=1:repeat-headers=1:aud=1:hrd=1:colorprim=smpte432:transfer=smpte2084:colormatrix=bt709:range=limited:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=0,0:vbv-maxrate=100000:vbv-bufsize=100000:aq-mode=3:no-sao=1 -color_primaries smpte432 -color_trc smpte2084 -colorspace bt709 -color_range tv -f hevc -y ./qc/out/mux/.BROS-MUX-tmp/video.hevc
+MP4Box -add "<HEVC encoded from prores4444_p3pq.mov>:lang=und:name=Video:disable=no:fps=24:colr=nclx,12,16,1,no" -add ./qc/out/clips/prores4444_p3pq.mov#trackID=3:name=Timecode:disable=no -inter 500 -moovpad 4096 -tmp ./qc/out/mux/.BROS-MUX-tmp -new ./qc/out/mux/hdr_p3_keep.mp4
+
+
+RESULT (N s): ok
+  • Picture: RE-ENCODED (Apple ProRes 4444 → HEVC Main 10)
+  • Picture: HEVC Main 10 4:2:0 P3 D65 · PQ · x265 slow, CRF 14 (max 100 Mbps) · 120 frames in N s · HDR10 P3-D65 · 0.0001–1000 nits, MaxCLL 0, MaxFALL 0
+  • Picture: HEVC Main 10 · 120 frames (expected 120) ✓
+  • Colour tags: Display P3 / PQ / BT.709 (primaries / transfer / matrix) ✓
+  • HDR10 (P3 D65 · PQ · SMPTE ST 2086 mastering + MaxCLL/MaxFALL): signalled ✓
+
+ACADEMY SEAL (verified): 🔴 NOT APPROVED BY THE ACADEMY
+  [PASS] File name: Only legal characters ([A-Za-z0-9._-])
+  [FAIL] Video codec: HEVC Main 10 is not accepted — use ProRes 422 HQ or H.264
+  [PASS] Resolution: 1920×1080 (HD)
+  [PASS] Frame rate: 24.000 fps
+  [INFO] Forensic watermarking: 24.000 fps — films purchasing forensic watermarking must be 23.976 or 29.97 fps
+  [PASS] Scan type: Progressive
+  [FAIL] Dynamic range: HDR — the Academy requires SDR
+  [FAIL] Color primaries: Display P3 — must be ITU-R BT.709 (no exceptions)
+  [FAIL] Transfer function: PQ — must be ITU-R BT.709 (no exceptions)
+  [PASS] YCbCr matrix: BT.709
+  [INFO] Video bitrate: 12.8 Mbps (ProRes 422 HQ: ~220 Mbps expected)
+  [FAIL] Audio: No audio track — audio is required for each video file
+  [INFO] Loudness: -27 LKFS ±2 dialogue-gated and -2 dBTP are requested; the Academy may adjust levels (not part of the seal)
+  [PASS] Apple QuickTime compatibility: AVFoundation sees every track (1 video, 0 audio) and can play the file

@@ -27,7 +27,7 @@ cd "$(dirname "$0")"
 OUT=qc/out; REF=qc/reference; CLIPS=$OUT/clips; SHOTS=$OUT/shots; LOGS=$OUT/logs
 APP=build.noindex/BROS-MUX.app; BIN=$APP/Contents/MacOS/BROS-MUX
 REPORT=$OUT/QC-REPORT.txt
-CLIPGEN=3                      # suba quando os clipes de teste mudarem: eles são gerados de novo
+CLIPGEN=4                      # suba quando os clipes de teste mudarem: eles são gerados de novo
 mkdir -p "$CLIPS" "$LOGS" "$OUT/mux" "$OUT/transcode"
 rm -rf "$OUT/previous"; [[ -d $SHOTS ]] && mv "$SHOTS" "$OUT/previous"
 mkdir -p "$SHOTS"
@@ -90,9 +90,11 @@ for ch in L R C LFE Ls Rs; do
   fi
   MONOS+=(--add "$CLIPS/tone.$ch.wav")
 done
-n=0; for f in ref.wav h264_709.mov prores4444_alpha.mov hevc10_pq2020.mov prores4444_p3pq.mov guide.wav guide_late100ms.wav tone.L.wav tone.R.wav tone.C.wav tone.LFE.wav tone.Ls.wav tone.Rs.wav; do [[ -s $CLIPS/$f ]] && (( n++ )); done
-if (( n == 13 )); then print -r -- "$CLIPGEN" > "$CLIPS/.gen"; pass "Clipes de teste: 4 vídeos (H.264 Rec.709 e ProRes 4444 alfa de 12 s, HEVC 10-bit PQ/BT.2020 e ProRes 4444 P3-D65/PQ de 5 s), 2 guias estéreo e 6 monos"
-else fail "Clipes de teste: só $n de 13 existem em $CLIPS"; finish; fi
+# a picture carrying a 5.1 as six mono PCM streams inside the MOV (what DaVinci Resolve writes; the 2DIE4 master is like this)
+[[ -f $CLIPS/h264_6monos.mov ]] || $FF -f lavfi -i "$VSRC" -i "$CLIPS/tone.L.wav" -i "$CLIPS/tone.R.wav" -i "$CLIPS/tone.C.wav" -i "$CLIPS/tone.LFE.wav" -i "$CLIPS/tone.Ls.wav" -i "$CLIPS/tone.Rs.wav" -t 12 -map 0:v -map 1:a -map 2:a -map 3:a -map 4:a -map 5:a -map 6:a -vf "format=yuv420p,$T709" -c:v libx264 -preset ultrafast -crf 18 -c:a pcm_s24le -timecode 01:00:00:00 "$CLIPS/h264_6monos.mov"
+n=0; for f in ref.wav h264_709.mov prores4444_alpha.mov hevc10_pq2020.mov prores4444_p3pq.mov h264_6monos.mov guide.wav guide_late100ms.wav tone.L.wav tone.R.wav tone.C.wav tone.LFE.wav tone.Ls.wav tone.Rs.wav; do [[ -s $CLIPS/$f ]] && (( n++ )); done
+if (( n == 14 )); then print -r -- "$CLIPGEN" > "$CLIPS/.gen"; pass "Clipes de teste: 5 vídeos (H.264 Rec.709, ProRes 4444 alfa e H.264 com 6 monos PCM embutidos de 12 s; HEVC 10-bit PQ/BT.2020 e ProRes 4444 P3-D65/PQ de 5 s), 2 guias estéreo e 6 monos"
+else fail "Clipes de teste: só $n de 14 existem em $CLIPS"; finish; fi
 
 # 3. Mux --------------------------------------------------------------------------------------------------------
 L=$LOGS/mux_stereo.txt; rm -f "$OUT/mux/stereo.mov"
@@ -140,6 +142,37 @@ if grep -q '^RESULT.*: ok' "$L" && grep -q 'WARNING: The source is P3-D65' "$L" 
   pass "Encode HDR10 com --keep-source-primaries: sai como veio (tags $T) e o log avisa que está fora da convenção HDR10"
 else fail "Encode HDR10 com --keep-source-primaries: tags ${T:-?}, aviso $(grep -c 'WARNING: The source is P3-D65' "$L") (veja $L)"; fi
 
+# Dolby Vision de verdade: um XML sintético válido (120 frames, 2 shots), lido de volta do arquivo final
+for src in hevc10_pq2020 prores4444_p3pq; do
+  L=$LOGS/mux_dv_$src.txt; rm -f "$OUT/mux/dv_$src.mp4"
+  "$BIN" --job -o "$OUT/mux/dv_$src.mp4" --video "$CLIPS/$src.mov" --dv "$REF/dv-120f.xml" --quality maximum --speed slow > "$L" 2>&1
+  if grep -q '^RESULT.*: ok' "$L" && grep -q 'Dolby Vision 8.1 (HDR10-compatible): signalled ✓' "$L" && grep -q 'identical to the generated RPU, all 120 frames (2 shots) ✓' "$L"; then
+    pass "Encode Dolby Vision de $src com XML válido: ok, DV 8.1 sinalizado, metadado lido de volta idêntico (120 frames, 2 shots)"
+  else fail "Encode Dolby Vision de $src (veja $L)"; fi
+done
+
+# o caso do dono: o vídeo traz um 5.1 em 6 monos PCM; a linha de comando deixa o som do vídeo de fora e o usa como referência
+L=$LOGS/mux_embedded_monos.txt; rm -f "$OUT/mux/embedded_monos.mov"
+"$BIN" --job -o "$OUT/mux/embedded_monos.mov" --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav" --no-picture-check > "$L" 2>&1
+NA=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$OUT/mux/embedded_monos.mov" 2>/dev/null | grep -c .)
+CH=$(probe a:0 channels "$OUT/mux/embedded_monos.mov")
+if grep -q '^RESULT.*: ok' "$L" && grep -q 'bit-identical ✓' "$L" && [[ $NA == 1 && $CH == 2 ]]; then
+  pass "Vídeo com 6 monos embutidos + guia: o som do vídeo ficou fora (1 faixa de áudio, $CH canais), guia bit a bit"
+else fail "Vídeo com 6 monos embutidos: $NA faixa(s) de áudio, $CH canais (veja $L)"; fi
+
+# saída dourada: com a mesma entrada, o motor imprime exatamente o mesmo que o binário da base (qc/reference/golden)
+norm() { sed -E "s#$PWD#.#g; s#RESULT \([0-9]+ s\)#RESULT (N s)#; s#BROS-MUX-tmp-[0-9A-Fa-f-]+#BROS-MUX-tmp-X#g; s#frames in [0-9]+ s#frames in N s#g" "$1" | grep -v '^  … ' }
+golden() {
+  local g n bad=() ok=0
+  for g in $REF/golden/*.txt; do
+    n=${g:t}
+    if [[ ! -f $LOGS/$n ]]; then bad+=("$n (não gerado)"); continue; fi
+    if diff -q <(norm "$LOGS/$n") "$g" > /dev/null; then (( ok++ )); else bad+=("$n"); diff <(norm "$LOGS/$n") "$g" > "$LOGS/golden_${n%.txt}.diff"; fi
+  done
+  if (( ${#bad} == 0 )); then pass "Saída dourada: $ok logs de --job e --transcode idênticos aos do binário da base"
+  else fail "Saída dourada: ${#bad} log(s) mudaram em relação ao binário da base: ${bad[*]} (diffs em $LOGS/golden_*.diff)"; fi
+}
+
 # 4. Transcode --------------------------------------------------------------------------------------------------
 for clip in prores4444_alpha hevc10_pq2020 h264_709; do
   src=$CLIPS/$clip.mov; SP=$(probe v:0 color_primaries "$src"); ST=$(probe v:0 color_transfer "$src"); FR=$(probe v:0 nb_frames "$src")
@@ -161,6 +194,37 @@ for clip in prores4444_alpha hevc10_pq2020 h264_709; do
   done
 done
 
+golden
+
+# 4b. Delivery: o arquivo de job (.bmjob) reproduz o projeto e roda sem janela (--job-file) --------------------------
+JF=$OUT/jobs; rm -rf "$JF"; mkdir -p "$JF"
+jobcase() {   # NAME EXPECT -- snapshot/buildProject flags: grava o job, confere o texto canônico e roda
+  local name=$1; shift
+  local job=$JF/$name.bmjob L=$LOGS/jobfile_$name.txt
+  "$BIN" --snapshot -o "$JF/$name.png" --save-job "$job" "$@" > "$L" 2>&1
+  [[ -s $job ]] || { fail "Job $name: o .bmjob não foi gravado (veja $L)"; return 1 }
+  "$BIN" --job-file "$job" --dry-run >> "$L" 2>&1 || { fail "Job $name: --dry-run falhou (veja $L)"; return 1 }
+  grep -q '^CANONICAL-MATCH: yes' "$L" || { fail "Job $name: o job relido não reproduz o projeto (veja $L)"; return 1 }
+  "$BIN" --job-file "$job" >> "$L" 2>&1
+  grep -q '^RESULT.*: ok' "$L" || { fail "Job $name: o render não terminou ok (veja $L)"; return 1 }
+  return 0
+}
+if jobcase copy --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --deliver-to "$JF/copy.mov"; then
+  pass "Job salvo e rodado sem janela (--job-file): cópia bit a bit, o job relido reproduz o projeto"; fi
+if jobcase prores --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --to prores422hq --deliver-to "$JF/prores.mov"; then
+  c=$(probe v:0 codec_name "$JF/prores.mov"); p=$(probe v:0 profile "$JF/prores.mov"); NT=$(ffprobe -v error -select_streams d -show_entries stream=codec_tag_string -of csv=p=0 "$JF/prores.mov" | grep -c tmcd)
+  if [[ $c == prores && $p == *HQ* && $NT == 1 ]] && grep -q 'TRANSCODED in step 1' "$LOGS/jobfile_prores.txt"; then pass "Job em duas etapas: ProRes 422 HQ + áudio externo bit a bit, um só timecode, o resultado diz que a imagem foi transcodada"
+  else fail "Job em duas etapas: codec $c perfil $p timecodes $NT (veja $LOGS/jobfile_prores.txt)"; fi
+fi
+if jobcase aac --video "$CLIPS/h264_709.mov" $MONOS --audio-delivery aac --deliver-to "$JF/aac.mp4"; then
+  a=$(probe a:0 codec_name "$JF/aac.mp4"); ch=$(probe a:0 channels "$JF/aac.mp4")
+  if [[ $a == aac && $ch == 6 ]] && grep -q 'lag 0' "$LOGS/jobfile_aac.txt"; then pass "Job com áudio transcodado para AAC 5.1: 6 canais, sync conferido (atraso 0) e níveis por canal conferidos"
+  else fail "Job com AAC: codec $a, $ch canais (veja $LOGS/jobfile_aac.txt)"; fi
+fi
+if "$BIN" --snapshot -o "$JF/dv-copy.png" --save-job "$JF/dvcopy.bmjob" --video "$CLIPS/hevc10_pq2020.mov" --dv "$REF/dv-120f.xml" --video-copy --deliver-to "$JF/dvcopy.mp4" > "$LOGS/jobfile_dvcopy.txt" 2>&1 && ! "$BIN" --job-file "$JF/dvcopy.bmjob" --dry-run >> "$LOGS/jobfile_dvcopy.txt" 2>&1 && grep -q 'loaded but the picture would be copied' "$LOGS/jobfile_dvcopy.txt"; then
+  pass "Dolby Vision carregado com a imagem em COPY: o job se recusa a começar e diz por quê (nunca em silêncio)"
+else fail "Dolby Vision com a imagem em COPY não foi recusado (veja $LOGS/jobfile_dvcopy.txt)"; fi
+
 # 5. capturas ---------------------------------------------------------------------------------------------------
 snap() {
   local name=$1; shift
@@ -168,14 +232,27 @@ snap() {
   if [[ -s $SHOTS/$name.png ]] && (( $(stat -f %z "$SHOTS/$name.png") > 20000 )); then pass "Captura $name.png"
   else fail "Captura $name.png não saiu (veja $LOGS/snap_$name.txt)"; fi
 }
+# Beta 2.0.0: uma captura por aba e por pop-up (as da v1.x tinham outros nomes: a comparação é a folha antes × depois)
 snap welcome --welcome
-snap mux-stereo --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
-snap mux-group --video "$CLIPS/h264_709.mov" $MONOS
-snap mux-banner --video "$CLIPS/hevc10_pq2020.mov" --dv "$REF/dummy_dv.xml"
-snap mux-dark --dark --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
-snap transcode --transcode "$CLIPS/h264_709.mov"
-snap transcode-hevc --transcode "$CLIPS/hevc10_pq2020.mov" --to hevc
+snap gallery --popup gallery
+snap video-empty --tab video
+snap video-copy --tab video --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
+snap video-dv --tab video --video "$CLIPS/prores4444_p3pq.mov" --dv "$REF/dv-120f.xml"
+snap popup-dv --popup dv --video "$CLIPS/prores4444_p3pq.mov" --dv "$REF/dv-120f.xml"
+snap popup-transcode --popup transcode --video "$CLIPS/prores4444_p3pq.mov" --dv "$REF/dv-120f.xml"
+snap video-transcode --transcode "$CLIPS/h264_709.mov" --to prores422hq
+snap audio-stereo --tab audio --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
+snap audio-monos --tab audio --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav"
+snap popup-useaudio --popup useaudio --video "$CLIPS/h264_6monos.mov" --add "$CLIPS/guide.wav"
+snap audio-group --tab audio --video "$CLIPS/h264_709.mov" $MONOS
+snap subtitles --tab subtitles --video "$CLIPS/h264_709.mov"
+snap delivery --tab delivery --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
+snap delivery-running --demo-running
+snap popup-savejob --popup savejob --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav"
 snap checker --inspect "$CLIPS/h264_709.mov"
+snap renderqc --tab qc
+snap atmos --tab atmos
+snap syncviewer --syncviewer --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide_late100ms.wav" --align
 
 # 6. o app abre -------------------------------------------------------------------------------------------------
 open -n -g "$APP"; sleep 6
