@@ -1049,11 +1049,20 @@ enum DeliveryCLI {
     /// "use the audio inside the video?" is the command line's own rule: no, it is the sync reference)
     static func capture(_ args: [String]) -> Int32 {
         guard let path = args.first, path.hasSuffix(".bmjob") else { print("usage: --job-file --capture OUT.bmjob -o DEST.mov|mp4|mkv [--video V] [--add A]… (the --job arguments)"); return 2 }
-        let a = CLIArgs(Array(args.dropFirst()))
+        // capture-only choices the --job arguments can't express: the picture's transcode (--to P), the picture kept as
+        // it is although HDR metadata is loaded (--video-copy) and the audio delivery of every included track (--audio-delivery)
+        var rest = Array(args.dropFirst()), to: String?, audioDelivery: AudioDelivery?, videoCopy = false
+        if let i = rest.firstIndex(of: "--to"), i + 1 < rest.count { to = rest[i + 1]; rest.removeSubrange(i...i + 1) }
+        if let i = rest.firstIndex(of: "--audio-delivery"), i + 1 < rest.count { audioDelivery = AudioDelivery(rawValue: rest[i + 1]); rest.removeSubrange(i...i + 1) }
+        if let i = rest.firstIndex(of: "--video-copy") { videoCopy = true; rest.remove(at: i) }
+        let a = CLIArgs(rest)
         guard let o = a.output else { print("an explicit -o DEST is required"); return 2 }
         let project = buildProject(a, output: o)
         for t in project.embeddedAudio where project.embeddedAudioAnswer[project.key(of: t)] == nil { project.embeddedAudioAnswer[project.key(of: t)] = t.include }
         if project.hdr.encode { project.video.choose(.hevcHDR, project: project) }
+        if videoCopy { project.video.choose(.copy, project: project) }
+        if let to, let p = TranscodePreset.named(to) { project.video.choose(.transcode(VideoTranscodeSettings(preset: p.rawValue)), project: project) }
+        if let audioDelivery { for i in project.tracks.indices where project.tracks[i].kind == .audio && project.tracks[i].include { project.tracks[i].delivery = audioDelivery } }
         let job = DeliveryJob.capture(project)
         let url = URL(fileURLWithPath: path)
         do {

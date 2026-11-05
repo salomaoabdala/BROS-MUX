@@ -4423,7 +4423,9 @@ func snapshot(_ args: [String]) {
             project.pictureReplaceRequest = [new]
             size = NSSize(width: 620, height: 460)
             view = AnyView(SnapshotReplaceCard(project: project, newFile: new))
-        // ── INTEGRATOR: add `case "gallery":` here (every pop-up above on one canvas) ──
+        case "gallery", "gallery2":
+            size = CryoGallery.snapshotSize
+            view = AnyView(CryoGallery(page: popup == "gallery2" ? 2 : 1))
         default:
             print("--popup: unknown pop-up “\(popup)” (dv transcode useaudio savejob replace)"); return
         }
@@ -4567,6 +4569,7 @@ enum Entry {
         switch args.first {
         case "--job": exit(runJobCLI(Array(args.dropFirst())))
         case "--job-file": exit(DeliveryCLI.run(Array(args.dropFirst())))
+        case "--selftest": exit(EngineSelfTest.run(Array(args.dropFirst())))
         case "--report": exit(runReportCLI(Array(args.dropFirst())))
         case "--snapshot": snapshot(Array(args.dropFirst()))
         case "--picture": exit(pictureCLI(Array(args.dropFirst())))

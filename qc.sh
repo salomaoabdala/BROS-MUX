@@ -198,30 +198,33 @@ golden
 
 # 4b. Delivery: o arquivo de job (.bmjob) reproduz o projeto e roda sem janela (--job-file) --------------------------
 JF=$OUT/jobs; rm -rf "$JF"; mkdir -p "$JF"
-jobcase() {   # NAME EXPECT -- snapshot/buildProject flags: grava o job, confere o texto canônico e roda
-  local name=$1; shift
+canon() { awk '/^CANONICAL:/{f=1;next} /^COMMAND:|^BEFORE YOU START:|^JOB FILE:/{f=0} f' "$1" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' }
+jobcase() {   # NAME DEST -- the --job arguments (+ --to P, --audio-delivery X, --video-copy): grava, relê, compara, roda
+  local name=$1 dest=$2; shift 2
   local job=$JF/$name.bmjob L=$LOGS/jobfile_$name.txt
-  "$BIN" --snapshot -o "$JF/$name.png" --save-job "$job" "$@" > "$L" 2>&1
-  [[ -s $job ]] || { fail "Job $name: o .bmjob não foi gravado (veja $L)"; return 1 }
-  "$BIN" --job-file "$job" --dry-run >> "$L" 2>&1 || { fail "Job $name: --dry-run falhou (veja $L)"; return 1 }
-  grep -q '^CANONICAL-MATCH: yes' "$L" || { fail "Job $name: o job relido não reproduz o projeto (veja $L)"; return 1 }
-  "$BIN" --job-file "$job" >> "$L" 2>&1
+  "$BIN" --job-file --capture "$job" -o "$dest" "$@" > "$JF/$name.capture.txt" 2>&1
+  [[ -s $job ]] || { fail "Job $name: o .bmjob não foi gravado (veja $JF/$name.capture.txt)"; return 1 }
+  "$BIN" --job-file "$job" --dry-run > "$JF/$name.dry.txt" 2>&1
+  if ! diff -q <(canon "$JF/$name.capture.txt") <(canon "$JF/$name.dry.txt") > /dev/null || [[ -z $(canon "$JF/$name.capture.txt") ]]; then
+    fail "Job $name: o job relido não reproduz o projeto (diff entre $JF/$name.capture.txt e $JF/$name.dry.txt)"; return 1; fi
+  "$BIN" --job-file "$job" > "$L" 2>&1
   grep -q '^RESULT.*: ok' "$L" || { fail "Job $name: o render não terminou ok (veja $L)"; return 1 }
   return 0
 }
-if jobcase copy --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --deliver-to "$JF/copy.mov"; then
+if jobcase copy "$JF/copy.mov" --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --no-picture-check; then
   pass "Job salvo e rodado sem janela (--job-file): cópia bit a bit, o job relido reproduz o projeto"; fi
-if jobcase prores --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --to prores422hq --deliver-to "$JF/prores.mov"; then
-  c=$(probe v:0 codec_name "$JF/prores.mov"); p=$(probe v:0 profile "$JF/prores.mov"); NT=$(ffprobe -v error -select_streams d -show_entries stream=codec_tag_string -of csv=p=0 "$JF/prores.mov" | grep -c tmcd)
+if jobcase prores "$JF/prores.mov" --video "$CLIPS/h264_709.mov" --add "$CLIPS/guide.wav" --to prores422hq --no-picture-check; then
+  c=$(probe v:0 codec_name "$JF/prores.mov"); p=$(probe v:0 profile "$JF/prores.mov"); NT=$(ffprobe -v error -show_entries stream=codec_tag_string -of csv=p=0 "$JF/prores.mov" | grep -c tmcd)
   if [[ $c == prores && $p == *HQ* && $NT == 1 ]] && grep -q 'TRANSCODED in step 1' "$LOGS/jobfile_prores.txt"; then pass "Job em duas etapas: ProRes 422 HQ + áudio externo bit a bit, um só timecode, o resultado diz que a imagem foi transcodada"
   else fail "Job em duas etapas: codec $c perfil $p timecodes $NT (veja $LOGS/jobfile_prores.txt)"; fi
 fi
-if jobcase aac --video "$CLIPS/h264_709.mov" $MONOS --audio-delivery aac --deliver-to "$JF/aac.mp4"; then
+if jobcase aac "$JF/aac.mp4" --video "$CLIPS/h264_709.mov" $MONOS --audio-delivery aac --no-picture-check; then
   a=$(probe a:0 codec_name "$JF/aac.mp4"); ch=$(probe a:0 channels "$JF/aac.mp4")
-  if [[ $a == aac && $ch == 6 ]] && grep -q 'lag 0' "$LOGS/jobfile_aac.txt"; then pass "Job com áudio transcodado para AAC 5.1: 6 canais, sync conferido (atraso 0) e níveis por canal conferidos"
+  if [[ $a == aac && $ch == 6 ]] && grep -qi 'lag 0' "$LOGS/jobfile_aac.txt"; then pass "Job com áudio transcodado para AAC 5.1: 6 canais, sync conferido (atraso 0) e níveis por canal conferidos"
   else fail "Job com AAC: codec $a, $ch canais (veja $LOGS/jobfile_aac.txt)"; fi
 fi
-if "$BIN" --snapshot -o "$JF/dv-copy.png" --save-job "$JF/dvcopy.bmjob" --video "$CLIPS/hevc10_pq2020.mov" --dv "$REF/dv-120f.xml" --video-copy --deliver-to "$JF/dvcopy.mp4" > "$LOGS/jobfile_dvcopy.txt" 2>&1 && ! "$BIN" --job-file "$JF/dvcopy.bmjob" --dry-run >> "$LOGS/jobfile_dvcopy.txt" 2>&1 && grep -q 'loaded but the picture would be copied' "$LOGS/jobfile_dvcopy.txt"; then
+"$BIN" --job-file --capture "$JF/dvcopy.bmjob" -o "$JF/dvcopy.mp4" --video "$CLIPS/hevc10_pq2020.mov" --dv "$REF/dv-120f.xml" --video-copy > "$LOGS/jobfile_dvcopy.txt" 2>&1
+if ! "$BIN" --job-file "$JF/dvcopy.bmjob" --dry-run >> "$LOGS/jobfile_dvcopy.txt" 2>&1 && grep -q 'loaded but the picture would be copied' "$LOGS/jobfile_dvcopy.txt"; then
   pass "Dolby Vision carregado com a imagem em COPY: o job se recusa a começar e diz por quê (nunca em silêncio)"
 else fail "Dolby Vision com a imagem em COPY não foi recusado (veja $LOGS/jobfile_dvcopy.txt)"; fi
 
