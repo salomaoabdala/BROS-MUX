@@ -8,6 +8,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import CryptoKit
+import Accelerate
 
 // MARK: - What this ffmpeg can do
 
@@ -614,11 +615,13 @@ enum Transcode {
 
     /// The 2-pass average mode: runs the first pass and returns its stats file (nil when the plan doesn't need one)
     static func twoPassStats(_ p: TranscodePlan, concat: URL?, tmp: URL, cancel: CancelFlag,
-                             stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void) throws -> URL? {
+                             stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void,
+                             progress: ((JobProgress) -> Void)? = nil) throws -> URL? {
         guard let r = p.video.rate, r.mode == .average, p.encoder == "libx265" else { return nil }
         let stats = tmp.appendingPathComponent("x265.stats")
         let args = arguments(p, concat: concat, output: stats, elementary: true, pass: 1, stats: stats)
-        let res = encode(args, frames: p.frames, label: "Pass 1 of 2: measuring the picture (x265, average \(r.targetMbps) Mbps)", cancel: cancel, stage: stage, log: log)
+        let res = encode(args, frames: p.frames, label: "Pass 1 of 2: measuring the picture (x265, average \(r.targetMbps) Mbps)", cancel: cancel, stage: stage, log: log,
+                         progress: relabel(.pass1, progress))
         if cancel.isSet { throw Cancelled() }
         guard res.status == 0, FileManager.default.fileExists(atPath: stats.path) else { throw AppError("The first pass failed (ffmpeg error \(res.status)). See the log.") }
         return stats
@@ -631,34 +634,65 @@ enum Transcode {
     }
 
     /// Runs ffmpeg with progress; returns the exit code and the frames encoded
+    /// `progress` (Beta 2.0.0, optional): the same -progress blocks as structured data — frame=, fps= (ffmpeg's running
+    /// average), bitrate= ("N/A" → nil, as in pass 1), total_size=, speed=, out_time_us= — once per block (at its
+    /// "progress=" line), with stage `.encode` (callers re-label it: pass 1, pass 2, transcode). The arguments, the stage
+    /// text and `done` (fed by frame(of:)) are exactly what they were.
     static func encode(_ args: [String], frames: Int, label: String, cancel: CancelFlag,
-                       stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void) -> (status: Int32, done: Int) {
+                       stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void,
+                       progress: ((JobProgress) -> Void)? = nil) -> (status: Int32, done: Int) {
         guard let ffmpeg = Tools.ffmpeg else { return (-1, 0) }
         log("ffmpeg " + args.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ") + "\n")
         let started = Date()
         var done = 0
         stage(label + "…", 0)
+        var block = JobProgress(stage: .encode, title: label + "…", fraction: 0, frame: 0, totalFrames: frames)
+        progress?(block)
         let status = Tools.runStreaming(ffmpeg, args, cancel: cancel, line: { l in
-            guard let f = frame(of: l) else { return }
-            done = f
-            let elapsed = Date().timeIntervalSince(started)
-            let fps = elapsed > 0 ? Double(f) / elapsed : 0
-            let left = fps > 0 ? Double(frames - f) / fps : 0
-            stage("\(label): frame \(Fmt.int(f)) of \(Fmt.int(frames)) · \(String(format: "%.1f", fps)) fps · \(Fmt.hm(left)) left", Double(f) / Double(max(frames, 1)))
+            if let f = frame(of: l) {
+                done = f
+                let elapsed = Date().timeIntervalSince(started)
+                let fps = elapsed > 0 ? Double(f) / elapsed : 0
+                let left = fps > 0 ? Double(frames - f) / fps : 0
+                let text = "\(label): frame \(Fmt.int(f)) of \(Fmt.int(frames)) · \(String(format: "%.1f", fps)) fps · \(Fmt.hm(left)) left"
+                stage(text, Double(f) / Double(max(frames, 1)))
+                if progress != nil { block.title = text; block.frame = f; block.fraction = min(1, Double(f) / Double(max(frames, 1))) }
+                return
+            }
+            guard let progress, let eq = l.firstIndex(of: "=") else { return }
+            let key = l[..<eq].trimmingCharacters(in: .whitespaces), value = l[l.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            switch key {
+            case "fps": block.fps = Double(value)
+            case "bitrate": block.bitrateKbps = value.hasSuffix("kbits/s") ? Double(value.dropLast(7).trimmingCharacters(in: .whitespaces)) : nil
+            case "total_size": block.outBytes = Int64(value)
+            case "speed": block.speed = value.hasSuffix("x") ? Double(value.dropLast().trimmingCharacters(in: .whitespaces)) : nil
+            case "progress": progress(block)
+            default: break
+            }
         }, log: log)
         return (status, done)
     }
 
+    /// The same progress, re-labelled with the stage the caller is in (nil stays nil: nothing is parsed)
+    static func relabel(_ stage: JobProgress.Stage, _ progress: ((JobProgress) -> Void)?) -> ((JobProgress) -> Void)? {
+        guard let progress else { return nil }
+        return { var p = $0; p.stage = stage; progress(p) }
+    }
+
     /// The Mux path: the picture as an elementary HEVC stream with the Dolby Vision / HDR10+ metadata injected.
     /// Returns the final stream (in `tmp`), the RPU that went in, and notes.
+    /// `progress` (Beta 2.0.0, optional): readMetadata → pass1 + pass2 (2-pass) or encode → injectHDR10Plus → injectDV, each
+    /// with its fraction inside the stage; the encode passes carry frames, fps, bitrate and bytes written.
     static func encodeElementary(_ p: TranscodePlan, tmp: URL, cancel: CancelFlag,
-                                 stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void) throws -> (hevc: URL, rpu: URL?, notes: [String]) {
+                                 stage: @escaping (String, Double) -> Void, log: @escaping (String) -> Void,
+                                 progress: ((JobProgress) -> Void)? = nil) throws -> (hevc: URL, rpu: URL?, notes: [String]) {
         let fm = FileManager.default
         var notes: [String] = []
         // 1. Dolby Vision metadata → RPU (checked against the frame count before hours of encoding)
         var rpu: URL?
         if let src = p.hdr?.dolbyVision {
             stage("Reading the Dolby Vision metadata…", 0)
+            progress?(JobProgress(stage: .readMetadata, title: "Reading the Dolby Vision metadata…", fraction: 0, totalFrames: p.frames))
             var xml = p.hdr?.dvXML
             if xml == nil {
                 switch src {
@@ -704,10 +738,10 @@ enum Transcode {
         let base = tmp.appendingPathComponent("video.hevc")
         let started = Date()
         let q = p.video.quality ?? .high, s = p.video.speed ?? .medium, rate = p.video.rate ?? HDRSettings.Rate()
-        let stats = try twoPassStats(p, concat: concat, tmp: tmp, cancel: cancel, stage: stage, log: log)
+        let stats = try twoPassStats(p, concat: concat, tmp: tmp, cancel: cancel, stage: stage, log: log, progress: progress)
         let args = arguments(p, concat: concat, output: base, elementary: true, pass: stats == nil ? 0 : 2, stats: stats)
         let label = stats == nil ? "Encoding the picture (x265 \(s.preset), \(rate.text(q)))" : "Pass 2 of 2: encoding the picture (x265 \(s.preset), \(rate.text(q)))"
-        let r = encode(args, frames: p.frames, label: label, cancel: cancel, stage: stage, log: log)
+        let r = encode(args, frames: p.frames, label: label, cancel: cancel, stage: stage, log: log, progress: relabel(stats == nil ? .encode : .pass2, progress))
         if cancel.isSet { throw Cancelled() }
         guard r.status == 0, fm.fileExists(atPath: base.path) else { throw AppError("The picture encode failed (ffmpeg error \(r.status)). See the log.") }
         guard r.done == p.frames else { throw AppError("The encode produced \(Fmt.int(r.done)) frames, \(Fmt.int(p.frames)) were expected — the source is shorter than its metadata says.") }
@@ -719,6 +753,7 @@ enum Transcode {
         var current = base
         if let j = p.hdr?.hdr10plus, let tool = Tools.hdr10plusTool {
             stage("Adding the HDR10+ metadata…", 0.5)
+            progress?(JobProgress(stage: .injectHDR10Plus, title: "Adding the HDR10+ metadata…", fraction: 0, totalFrames: p.frames))
             let next = tmp.appendingPathComponent("video.hdr10plus.hevc")
             let rr = Tools.runAll(tool, ["inject", "-i", current.path, "-j", j.path, "-o", next.path])
             log(rr.text)
@@ -729,6 +764,7 @@ enum Transcode {
         if cancel.isSet { throw Cancelled() }
         if let rpu, let tool = Tools.doviTool {
             stage("Adding the Dolby Vision metadata…", 0.8)
+            progress?(JobProgress(stage: .injectDV, title: "Adding the Dolby Vision metadata…", fraction: 0, totalFrames: p.frames))
             let next = tmp.appendingPathComponent("video.dv.hevc")
             let rr = Tools.runAll(tool, ["inject-rpu", "-i", current.path, "--rpu-in", rpu.path, "-o", next.path])
             log(rr.text)
@@ -864,18 +900,72 @@ final class TranscodeRunner {
     let cancel = CancelFlag()
     var onStage: (String, Double) -> Void = { _, _ in }
     var onLog: (String) -> Void = { _ in }
-    // Beta 2.0.0 (nil by default; forwarded to the inner JobRunner on the DV/HDR10+ path). Wave 0: declared, not called yet.
+    // Beta 2.0.0 — nil by default; the same rules as JobRunner's (called off the main thread, never waited on), and
+    // forwarded to the inner JobRunner on the Dolby Vision / HDR10+ path. onWorkFolder can come twice there: this
+    // runner's temporary folder, then the inner JobRunner's.
     var onProgress: ((JobProgress) -> Void)?
     var onFinding: ((String) -> Void)?
     var onWorkFolder: ((URL) -> Void)?
     private var inner: JobRunner?
+    private var findingsSent: [String] = []
 
     init(plan: TranscodePlan, output: URL, runQC: Bool, runVMAF: Bool) {
         self.plan = plan; self.output = output; self.runQC = runQC; self.runVMAF = runVMAF
     }
 
-    /// The stages this transcode will go through, with their weight in the overall % (wave 0: none yet)
-    static func plannedStages(_ plan: TranscodePlan, runQC: Bool, runVMAF: Bool) -> [(stage: JobProgress.Stage, weight: Double)] { [] }
+    /// The stages this transcode will go through, with their weight in the overall % — the stages run() reports, in order
+    /// (seconds-equivalent, as JobRunner's): the encode from TranscodePlan.estimatedSeconds (2-pass: pass 1 = 35 % of
+    /// pass 2); on the Dolby Vision / HDR10+ path the inner JobRunner's own plan (it reads the source's tracks to build it);
+    /// then checking the result 2 s, Render QC at ≈ 250 frames/s (it decodes every frame, small), VMAF 12 s per 8-second
+    /// stretch (3 stretches past 30 s, else 1), moving into place 0.5 s and the Academy / Zidoo check 5 s.
+    static func plannedStages(_ plan: TranscodePlan, runQC: Bool, runVMAF: Bool) -> [(stage: JobProgress.Stage, weight: Double)] {
+        JobRunner.merged(plannedItems(plan, runQC: runQC, runVMAF: runVMAF))
+    }
+    static func plannedItems(_ plan: TranscodePlan, runQC: Bool, runVMAF: Bool) -> [JobRunner.PlannedItem] {
+        var items: [JobRunner.PlannedItem] = []
+        if plan.needsInjection {
+            // the inner JobRunner's own plan, from the same job it will run (reading the source's tracks: a fraction of a second)
+            let placeholder = plan.source.url.deletingPathExtension().appendingPathExtension(plan.container.rawValue)
+            items += JobRunner.plannedItems(injectionSpec(plan, output: placeholder))
+        } else if let r = plan.video.rate, r.mode == .average, plan.encoder == "libx265" {
+            items.append(.init(stage: .pass1, weight: 0.35 * plan.estimatedSeconds / 1.35, key: nil))
+            items.append(.init(stage: .pass2, weight: plan.estimatedSeconds / 1.35, key: nil))
+        } else {
+            items.append(.init(stage: .transcodeVideo, weight: plan.estimatedSeconds, key: nil))
+        }
+        items.append(.init(stage: .checkResult, weight: 2, key: nil))
+        if runQC { items.append(.init(stage: .renderQC, weight: max(2, Double(plan.frames) / 250), key: nil)) }
+        if runVMAF && plan.color == .passthrough && Tools.canVMAF { items.append(.init(stage: .vmaf, weight: plan.seconds > 30 ? 36 : 12, key: nil)) }
+        if !plan.needsInjection { items.append(.init(stage: .finalize, weight: 0.5, key: nil)) }
+        items.append(.init(stage: .academy, weight: 5, key: nil))
+        return items
+    }
+    /// The Dolby Vision / HDR10+ path's job: the picture encoded with its metadata, the source's other tracks bit for bit
+    static func injectionSpec(_ plan: TranscodePlan, output: URL) -> JobSpec {
+        let project = Project()
+        let r = Probe.tracks(for: plan.source.url)
+        project.insert(r.tracks)
+        project.autoGroup()
+        project.container = plan.container
+        project.setOutput(output)
+        project.matchVideoEnd = false
+        let inc = project.tracks.filter { $0.include && $0.kind != .other && (plan.effectiveAudio != .none || $0.kind != .audio) }
+        var plans: [UUID: TrimPlan] = [:]
+        for t in inc where t.kind == .audio { if let p = project.plan(for: t), t.isGroup || t.channelPermutation != nil { plans[t.id] = p } }
+        return JobSpec(tracks: inc, plans: plans, output: output, disableExtraAudio: false, interleaveMs: 500, writeChannelMap: true,
+                       verifyAudio: true, verifyVideo: false, fixColorTag: false, isMOV: plan.container == .mov, reference: nil,
+                       isMKV: plan.container == .mkv, referenceOffset: 0, videoEncode: plan, pictureCheck: false)
+    }
+    private func progress(_ stage: JobProgress.Stage, _ title: String, _ f: Double) {
+        onProgress?(JobProgress(stage: stage, title: title, fraction: min(max(f, 0), 1)))
+    }
+    /// onFinding for the lines that went into the result since `old`
+    private func found(_ new: [String], since old: [String]) {
+        guard onFinding != nil, new.count > old.count else { return }
+        var left: [String: Int] = [:]
+        for l in old { left[l, default: 0] += 1 }
+        for l in new { if let n = left[l], n > 0 { left[l] = n - 1 } else { findingsSent.append(l); onFinding?(l) } }
+    }
     func requestCancel() { cancel.set(); inner?.requestCancel() }
 
     /// Problems that stop the job before anything is written
@@ -896,6 +986,17 @@ final class TranscodeRunner {
     }
 
     func run() -> TranscodeResult {
+        findingsSent = []
+        let r = runTranscode()
+        if onFinding != nil {      // the lines only a failure or a cancel adds
+            var seen: [String: Int] = [:]
+            for l in findingsSent { seen[l, default: 0] += 1 }
+            for l in r.lines { if let n = seen[l], n > 0 { seen[l] = n - 1 } else { onFinding?(l) } }
+        }
+        return r
+    }
+
+    private func runTranscode() -> TranscodeResult {
         let started = Date()
         if let problem = Self.validate(plan, output: output) { return TranscodeResult(state: .failed, lines: [problem], output: nil) }
         let activity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .userInitiated], reason: "BROS-MUX is transcoding")
@@ -906,34 +1007,28 @@ final class TranscodeRunner {
         let tmp = dir.appendingPathComponent(".BROS-MUX-tmp-\(UUID().uuidString)", isDirectory: true)
         do { try fm.createDirectory(at: tmp, withIntermediateDirectories: false) }
         catch { return TranscodeResult(state: .failed, lines: ["Couldn't create the temporary folder: \(error.localizedDescription)"], output: nil) }
+        let tempLock = JobRunner.TempLock(tmp)      // Beta 2.0.0: removeStaleTemps leaves this folder alone while the job runs
+        defer { tempLock.release() }
         defer { try? fm.removeItem(at: tmp) }
+        onWorkFolder?(tmp)
         let cancelled = TranscodeResult(state: .cancelled, lines: ["Cancelled — nothing was written to the destination."], output: nil)
-        var lines: [String] = []
+        var quiet = false                              // the inner JobRunner's lines were already sent, live
+        var lines: [String] = [] { didSet { if !quiet { found(lines, since: oldValue) } } }
         var ok = true, warn = false
         let tmpOut: URL
 
         if plan.needsInjection {
             // Dolby Vision / HDR10+: the Mux engine does it (elementary HEVC + injection + MP4Box + bit-exact audio)
-            let project = Project()
-            let r = Probe.tracks(for: plan.source.url)
-            project.insert(r.tracks)
-            project.autoGroup()
-            project.container = plan.container
-            project.setOutput(output)
-            project.matchVideoEnd = false
-            let inc = project.tracks.filter { $0.include && $0.kind != .other && (plan.effectiveAudio != .none || $0.kind != .audio) }
-            var plans: [UUID: TrimPlan] = [:]
-            for t in inc where t.kind == .audio { if let p = project.plan(for: t), t.isGroup || t.channelPermutation != nil { plans[t.id] = p } }
-            let spec = JobSpec(tracks: inc, plans: plans, output: output, disableExtraAudio: false, interleaveMs: 500, writeChannelMap: true,
-                               verifyAudio: true, verifyVideo: false, fixColorTag: false, isMOV: plan.container == .mov, reference: nil,
-                               isMKV: plan.container == .mkv, referenceOffset: 0, videoEncode: plan, pictureCheck: false)
+            let spec = Self.injectionSpec(plan, output: output)
             let job = JobRunner(spec)
             inner = job
             job.onStage = onStage; job.onLog = onLog
+            job.onProgress = onProgress; job.onFinding = onFinding; job.onWorkFolder = onWorkFolder
             let res = job.run()
+            findingsSent += res.lines
             if res.state == .cancelled || cancel.isSet { return cancelled }
             guard let out = res.output else { return TranscodeResult(state: .failed, lines: res.lines, output: nil) }
-            lines = res.lines
+            quiet = true; lines = res.lines; quiet = false
             ok = res.state != .failed
             warn = res.state == .warning
             tmpOut = out                      // already in place; the checks below run on the final file
@@ -941,7 +1036,7 @@ final class TranscodeRunner {
             let ext = plan.container.rawValue
             let t = tmp.appendingPathComponent("output.\(ext)")
             let stats: URL?
-            do { stats = try Transcode.twoPassStats(plan, concat: nil, tmp: tmp, cancel: cancel, stage: onStage, log: onLog) }
+            do { stats = try Transcode.twoPassStats(plan, concat: nil, tmp: tmp, cancel: cancel, stage: onStage, log: onLog, progress: onProgress) }
             catch is Cancelled { return cancelled }
             catch { return TranscodeResult(state: .failed, lines: [error.localizedDescription], output: nil) }
             let args = Transcode.arguments(plan, concat: nil, output: t, elementary: false, pass: stats == nil ? 0 : 2, stats: stats)
@@ -951,7 +1046,8 @@ final class TranscodeRunner {
             case .h264(let q, let s): what = "Encoding H.264 (\(plan.usesVideoToolbox ? "VideoToolbox" : "x264 \(s.preset)"), quality \(q.label.lowercased()))"
             case .hevc(let q, let s, let r): what = (stats == nil ? "Encoding HEVC" : "Pass 2 of 2: encoding HEVC") + " (\(plan.usesVideoToolbox ? "VideoToolbox" : "x265 \(s.preset)"), \(r.text(q)))"
             }
-            let r = Transcode.encode(args, frames: plan.frames, label: what, cancel: cancel, stage: onStage, log: onLog)
+            let r = Transcode.encode(args, frames: plan.frames, label: what, cancel: cancel, stage: onStage, log: onLog,
+                                     progress: Transcode.relabel(stats == nil ? .transcodeVideo : .pass2, onProgress))
             if cancel.isSet { return cancelled }
             guard r.status == 0, fm.fileExists(atPath: t.path) else {
                 return TranscodeResult(state: .failed, lines: ["The encode failed (ffmpeg error \(r.status)). See the log."], output: nil)
@@ -962,6 +1058,7 @@ final class TranscodeRunner {
 
         // checks on the picture written
         onStage("Checking the result (frames, duration, colour, timecode)…", 0.9)
+        progress(.checkResult, "Checking the result (frames, duration, colour, timecode)…", 0)
         let mi = MediaInfo.tracks(tmpOut)
         let streams = Probe.raw(tmpOut)?.streams ?? []
         if let v = mi.first(where: { $0.type == "Video" }), let vs = streams.first(where: { $0.codec_type == "video" }) {
@@ -1000,7 +1097,11 @@ final class TranscodeRunner {
 
         var qcReport: RenderQC.Report?
         if runQC {
-            let rep = RenderQC.run(url: tmpOut, cancel: cancel) { s, p in self.onStage("Render QC on the result: " + s, 0.9 + p * 0.08) }
+            progress(.renderQC, "Render QC on the result…", 0)
+            let rep = RenderQC.run(url: tmpOut, cancel: cancel) { s, p in
+                self.onStage("Render QC on the result: " + s, 0.9 + p * 0.08)
+                self.progress(.renderQC, "Render QC on the result: " + s, p)
+            }
             if cancel.isSet { return cancelled }
             if let rep {
                 qcReport = rep
@@ -1021,6 +1122,7 @@ final class TranscodeRunner {
         // into place (the Mux path already moved it)
         var finalOut = output
         if !plan.needsInjection {
+            progress(.finalize, "Moving the file into place…", 0)
             if !ok && fm.fileExists(atPath: output.path) {
                 let base = output.deletingPathExtension().lastPathComponent, ext = output.pathExtension
                 var n = 0
@@ -1033,6 +1135,7 @@ final class TranscodeRunner {
             } catch { return TranscodeResult(state: .failed, lines: lines + ["Couldn't move the final file into place: \(error.localizedDescription)"], output: nil) }
         } else { finalOut = tmpOut }
         onStage("Checking the final file against the Academy specs and the Zidoo…", 1)
+        progress(.academy, "Checking the final file against the Academy specs and the Zidoo…", 0)
         let insp = Inspection.analyze(finalOut)
         return TranscodeResult(state: ok ? (warn ? .warning : .ok) : .failed, lines: lines, output: finalOut, inspection: insp, qc: qcReport,
                                seconds: Date().timeIntervalSince(started))
@@ -1047,6 +1150,7 @@ final class TranscodeRunner {
         for (k, t) in points.enumerated() {
             if cancel.isSet { return nil }
             onStage("VMAF \(k + 1) of \(points.count) (\(Fmt.duration(t)))…", 0.98)
+            progress(.vmaf, "VMAF \(k + 1) of \(points.count) (\(Fmt.duration(t)))…", Double(k) / Double(points.count))
             let args = ["-nostdin", "-hide_banner", "-nostats", "-ss", String(format: "%.3f", t), "-t", String(format: "%.3f", len), "-i", out.path,
                         "-ss", String(format: "%.3f", t), "-t", String(format: "%.3f", len), "-i", plan.source.url.path,
                         "-lavfi", "[0:v]scale=1920:1080:flags=bicubic,format=yuv420p10le,setsar=1[d];[1:v]scale=1920:1080:flags=bicubic,format=yuv420p10le,setsar=1[r];[d][r]libvmaf=n_threads=8",
@@ -1067,18 +1171,428 @@ final class TranscodeRunner {
 // MARK: - Audio TRANSCODE (Beta 2.0.0): the pre-step the Delivery runs before JobRunner
 
 /// Audio TRANSCODE pre-step (run by the Delivery before JobRunner); the input is the bytes JobRunner would mux.
-/// Wave 0: declared with the contract's signatures; the engine owner (E2) writes the real ones.
+/// The codec changes, never the mix: the same samples go in (GroupSources / WavInfo.writeTrimmed with the TrimPlan and the
+/// channel permutation, exactly what JobRunner would have written; a non-WAV PCM stream is decoded by ffmpeg), each channel
+/// is labelled by its role with an explicit layout (refused when the roles aren't known), and after the mux `verify` checks
+/// the sync to the sample, the level and the identity of every channel against that same source.
+/// The output is in the layout's standard order (5.1: L R C LFE Ls Rs — the Academy's), each channel labelled by its role.
 enum AudioTranscode {
+    /// AAC bitrate: 640 Kbps above two channels (5.0 / 5.1), 256 Kbps stereo, 128 Kbps mono
+    static func aacKbps(channels: Int) -> Int { channels > 2 ? 640 : channels == 2 ? 256 : 128 }
+
+    /// "TRANSCODE → AAC 5.1 · 640 Kbps", "TRANSCODE → PCM 24-bit 5.1"
+    static func targetText(_ t: Track, to: AudioDelivery) -> String {
+        let ch = Probe.channelText(t.channels, nil)
+        switch to {
+        case .copy: return "COPY · bit-exact"
+        case .aac: return "TRANSCODE → AAC \(ch) · \(aacKbps(channels: t.channels)) Kbps"
+        case .pcm24: return "TRANSCODE → PCM 24-bit \(ch)"
+        }
+    }
+
+    static let dolbyCodecs: Set<String> = ["eac3", "ac3", "truehd", "mlp", "ac4"]
+
+    /// The roles of the channels in the order JobRunner writes them: the chosen order (channelTarget) when the channels are
+    /// permuted, else the roles heard or set (channelRoles), else the layout the file declares. nil = not known.
+    static func writtenRoles(_ t: Track) -> [ChannelRole]? {
+        let order = t.channelPermutation != nil ? t.channelTarget : t.sourceOrder
+        if let o = order, o.isComplete, o.count == t.channels { return o.roles }
+        if t.channelPermutation == nil, let l = t.channelLayout, let r = roles(ofLayout: l), r.count == t.channels { return r }
+        if t.channels == 1 { return [.M] }
+        if t.channels == 2 && t.channelPermutation == nil { return [.L, .R] }     // two channels with no labels: left, right (every player reads them so)
+        return nil
+    }
+    /// ffmpeg's layout names → roles (the order of the channels in that layout)
+    static func roles(ofLayout l: String) -> [ChannelRole]? {
+        switch l {
+        case "mono": return [.M]
+        case "stereo": return [.L, .R]
+        case "3.0": return [.L, .R, .C]
+        case "quad", "quad(side)": return [.L, .R, .Ls, .Rs]
+        case "5.0", "5.0(side)": return [.L, .R, .C, .Ls, .Rs]
+        case "5.1", "5.1(side)": return [.L, .R, .C, .LFE, .Ls, .Rs]
+        case "7.1": return [.L, .R, .C, .LFE, .Lrs, .Rrs, .Ls, .Rs]
+        default: return nil
+        }
+    }
+    /// The output: ffmpeg's name for each role, and the layout they make (AAC through AudioToolbox takes the "side" 5.x)
+    static func outputLayout(_ roles: [ChannelRole], for to: AudioDelivery) -> (names: [String], layout: String)? {
+        let rears = roles.contains(.Lrs) || roles.contains(.Rrs)
+        let side = to == .aac || rears
+        func name(_ r: ChannelRole) -> String {
+            switch r {
+            case .L: return "FL"; case .R: return "FR"; case .C, .M: return "FC"; case .LFE: return "LFE"
+            case .Ls: return side ? "SL" : "BL"; case .Rs: return side ? "SR" : "BR"
+            case .Lrs: return "BL"; case .Rrs: return "BR"
+            }
+        }
+        let names = roles.map(name)
+        guard Set(names).count == names.count else { return nil }
+        let layouts: [(Set<String>, String)] = [
+            (["FC"], "mono"), (["FL", "FR"], "stereo"), (["FL", "FR", "FC"], "3.0"),
+            (["FL", "FR", "BL", "BR"], "quad"), (["FL", "FR", "SL", "SR"], "quad(side)"),
+            (["FL", "FR", "FC", "BL", "BR"], "5.0"), (["FL", "FR", "FC", "SL", "SR"], "5.0(side)"),
+            (["FL", "FR", "FC", "LFE", "BL", "BR"], "5.1"), (["FL", "FR", "FC", "LFE", "SL", "SR"], "5.1(side)"),
+            (["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"], "7.1"),
+        ]
+        guard let l = layouts.first(where: { $0.0 == Set(names) })?.1 else { return nil }
+        if to == .aac && !["mono", "stereo", "3.0", "quad", "5.0(side)", "5.1(side)"].contains(l) { return nil }
+        return (names, l)
+    }
+
+    // the highest sample of a float source (dBFS), measured once per track: PCM 24-bit can't hold more than 0 dBFS
+    private static let peakLock = NSLock()
+    private static var peakCache: [String: Double] = [:]
+    private static func peakKey(_ t: Track) -> String { (t.isGroup ? t.members : [t]).map { "\($0.url.path)#\($0.streamIndex)" }.joined(separator: "|") }
+    private static func peakDB(_ url: URL, map: String, cancel: CancelFlag) -> Double? {
+        guard let ffmpeg = Tools.ffmpeg,
+              let d = Tools.runCancellable(ffmpeg, ["-nostdin", "-hide_banner", "-v", "info", "-i", url.path, "-map", map,
+                                                    "-af", "astats=measure_perchannel=none:measure_overall=Peak_level", "-f", "null", "-"], cancel: cancel, stderr: true)
+        else { return nil }
+        let text = String(decoding: d, as: UTF8.self)
+        guard let r = text.range(of: #"Peak level dB: (-?inf|-?[0-9.]+)"#, options: [.regularExpression, .backwards]) else { return nil }
+        let v = String(text[r].split(separator: ":").last ?? "").trimmingCharacters(in: .whitespaces)
+        return v.hasSuffix("inf") ? -Double.infinity : Double(v)
+    }
+    /// The peak of a float PCM source in dBFS (a full read — call it off the main thread; problem() then knows it)
+    static func measureFloatPeak(_ t: Track, cancel: CancelFlag) -> Double? {
+        guard t.isFloatPCM else { return nil }
+        let key = peakKey(t)
+        peakLock.lock(); let known = peakCache[key]; peakLock.unlock()
+        if let known { return known }
+        var peak = -Double.infinity
+        for m in t.isGroup ? t.members : [t] {
+            guard let p = peakDB(m.url, map: "0:\(m.streamIndex)", cancel: cancel) else { return nil }
+            peak = max(peak, p)
+        }
+        peakLock.lock(); peakCache[key] = peak; peakLock.unlock()
+        return peak
+    }
+
     /// Why this track can't become `to` (AAC > 8 ch, float > 0 dBFS → PCM 24, Dolby source…); nil = it can
-    static func problem(_ t: Track, to: AudioDelivery) -> String? { nil }
+    /// Quick: nothing is decoded. A float source's peak is known only once measureFloatPeak (or prepare) has read it.
+    static func problem(_ t: Track, to: AudioDelivery) -> String? {
+        guard to != .copy else { return nil }
+        let name = "“\(t.title)”"
+        guard t.kind == .audio else { return "\(name) isn't audio." }
+        if dolbyCodecs.contains(t.codecKey) || t.isAtmos {
+            return "\(name) is Dolby (\(t.codecName)): it only goes in as it is (COPY) — re-encoding would lose the Dolby / Atmos metadata."
+        }
+        if to == .aac && t.codecKey == "aac" { return "\(name) is already AAC: COPY keeps it as it is (encoding AAC again only loses quality)." }
+        if to == .pcm24 && t.codecKey == "pcm_s24le" { return "\(name) is already PCM 24-bit: COPY gives the same samples, bit for bit." }
+        if to == .aac && t.channels > 8 { return "AAC carries up to 8 channels and \(name) has \(t.channels) — keep it as it is (COPY)." }
+        if to == .aac && t.sampleRate > 48000 { return "AAC is made at 48 kHz or less here and \(name) is \(Fmt.hz(t.sampleRate)) — keep it as it is (COPY) or use PCM 24-bit." }
+        guard t.sampleRate > 0, t.channels > 0 else { return "\(name): the sample rate and channels couldn't be read." }
+        guard let roles = writtenRoles(t) else {
+            return "The channels of \(name) aren't identified (\(t.channels) channels, no labels) — set them first with “Channels…”, so each one keeps its place."
+        }
+        guard outputLayout(roles, for: to) != nil else {
+            let order = ChannelOrder(roles: roles).text
+            return to == .aac ? "AAC here takes mono, stereo, 3.0, quad, 5.0 or 5.1 — \(name) is \(order): deliver it as PCM 24-bit or COPY."
+                              : "PCM 24-bit here takes mono, stereo, 3.0, quad, 5.0, 5.1 or 7.1 — \(name) is \(order): keep it as it is (COPY)."
+        }
+        if to == .pcm24 && t.isFloatPCM {
+            peakLock.lock(); let peak = peakCache[peakKey(t)]; peakLock.unlock()
+            if let peak, peak > 0 {
+                return "\(name) is float and peaks at \(String(format: "%+.2f", peak)) dBFS: PCM 24-bit would clip it — keep it as it is (COPY)."
+            }
+        }
+        return nil
+    }
+
     /// Writes <folder>/audio-<n>.m4a (AAC, edit list kept) or .wav (PCM 24-bit, -rf64 auto); returns it
     static func prepare(_ t: Track, plan: TrimPlan?, to: AudioDelivery, folder: URL, index: Int, cancel: CancelFlag,
                         progress: (Double) -> Void) throws -> URL {
-        throw AppError("Audio transcode isn't implemented yet (“\(t.title)” → \(to.label)).")
+        guard to != .copy else { throw AppError("Nothing to transcode: “\(t.title)” goes in as it is (COPY).") }
+        if let p = problem(t, to: to) { throw AppError(p) }
+        guard Tools.ffmpeg != nil else { throw AppError("ffmpeg isn't installed. Run: brew install ffmpeg") }
+        guard let roles = writtenRoles(t), let layout = outputLayout(roles, for: to) else { throw AppError("The channels of “\(t.title)” aren't identified.") }
+        let fm = FileManager.default
+        // 1. the bytes JobRunner would mux (same trim, same channel order), as a WAV next to the output
+        var input = t.url, map = "0:\(t.streamIndex)"
+        var frames = Int((t.duration * t.sampleRate).rounded())
+        var temp: URL?
+        defer { if let temp { try? fm.removeItem(at: temp) } }
+        if t.isGroup {
+            let plan = plan ?? TrimPlan(pad: 0, cut: 0, keep: t.groupTotal, total: t.groupTotal)
+            let dst = folder.appendingPathComponent("audio-\(index)-input.wav")
+            temp = dst
+            let bps = t.groupBPS
+            var sources: [ByteSource] = []
+            defer { for s in sources { try? s.finish() } }
+            for m in t.orderedMembers { sources.append(try GroupSources.open(m, as: t.codecKey, bps: bps, pad: plan.pad, cut: plan.cut, keep: plan.keep)) }
+            let order = t.channelPermutation != nil ? t.channelTarget : t.sourceOrder
+            let fmt = GroupSources.fmtChunk(channels: t.channels, sampleRate: t.sampleRate, bps: bps, validBits: t.bitDepth, float: t.isFloatPCM,
+                                            order: order?.isComplete == true ? order : nil)
+            try GroupSources.writeInterleaved(sources, bps: bps, frames: plan.pad + plan.keep, fmt: fmt, to: dst, cancel: cancel) { progress($0 * 0.2) }
+            input = dst; map = "0:a:0"; frames = plan.pad + plan.keep
+        } else if t.isPCM, let wav = t.wav {
+            let total = wav.dataSize / max(wav.blockAlign, 1)
+            let plan = plan ?? TrimPlan(pad: 0, cut: 0, keep: total, total: total)
+            let dst = folder.appendingPathComponent("audio-\(index)-input.wav")
+            temp = dst
+            try WavInfo.writeTrimmed(wav, from: t.url, to: dst, pad: plan.pad, cut: plan.cut, keep: plan.keep, order: t.channelPermutation, cancel: cancel) { progress($0 * 0.2) }
+            input = dst; map = "0:a:0"; frames = plan.pad + plan.keep
+        } else if let plan, !plan.isIdentity {
+            throw AppError("“\(t.title)” (\(t.codecName)) can't be trimmed for the sync — only WAV and mono PCM can.")
+        }
+        if cancel.isSet { throw Cancelled() }
+        // 2. a float source must fit in 24 bits
+        if to == .pcm24 && t.isFloatPCM {
+            guard let peak = peakDB(input, map: map, cancel: cancel) else {
+                if cancel.isSet { throw Cancelled() }
+                throw AppError("Couldn't measure the peak of “\(t.title)”.")
+            }
+            if peak > 0 {
+                peakLock.lock(); peakCache[peakKey(t)] = max(peak, peakCache[peakKey(t)] ?? peak); peakLock.unlock()
+                throw AppError("“\(t.title)” is float and peaks at \(String(format: "%+.2f", peak)) dBFS: PCM 24-bit would clip it — keep it as it is (COPY).")
+            }
+        }
+        // 3. ffmpeg: each channel to its role, explicitly (channelmap by index → named channels of the layout), then the codec
+        let out = folder.appendingPathComponent("audio-\(index).\(to == .aac ? "m4a" : "wav")")
+        try? fm.removeItem(at: out)
+        let channelmap = "channelmap=map=" + layout.names.enumerated().map { "\($0.offset)-\($0.element)" }.joined(separator: "|") + ":channel_layout=\(layout.layout)"
+        var args = ["-nostdin", "-v", "error", "-nostats", "-progress", "pipe:1", "-i", input.path, "-map", map, "-vn", "-sn", "-dn",
+                    "-af", channelmap]
+        if to == .aac { args += ["-c:a", Tools.aacEncoder, "-b:a", "\(aacKbps(channels: t.channels))k", "-use_editlist", "1", "-y", out.path] }
+        else { args += ["-c:a", "pcm_s24le", "-rf64", "auto", "-y", out.path] }
+        let seconds = Double(max(frames, 1)) / max(t.sampleRate, 1)
+        let r = run(args, cancel: cancel) { line in
+            if line.hasPrefix("out_time_us="), let us = Double(line.dropFirst(12)) { progress(0.2 + 0.8 * min(1, max(0, us / 1e6 / seconds))) }
+        }
+        if cancel.isSet { try? fm.removeItem(at: out); throw Cancelled() }
+        guard r.status == 0, ((try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0 else {
+            try? fm.removeItem(at: out)
+            throw AppError("The audio transcode of “\(t.title)” failed (ffmpeg error \(r.status)): \(r.errors.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        progress(1)
+        return out
     }
+
+    /// ffmpeg read on this thread, line by line (stdout), the errors kept; the cancel flag stops it
+    private static func run(_ args: [String], cancel: CancelFlag, line: (String) -> Void) -> (status: Int32, errors: String) {
+        guard let ffmpeg = Tools.ffmpeg else { return (-1, "ffmpeg not found") }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: ffmpeg)
+        p.arguments = args
+        p.standardInput = FileHandle.nullDevice
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out; p.standardError = err
+        let lock = NSLock()
+        var errors = Data()
+        err.fileHandleForReading.readabilityHandler = { h in let d = h.availableData; lock.lock(); errors.append(d); lock.unlock() }
+        do { try p.run() } catch { err.fileHandleForReading.readabilityHandler = nil; return (-1, error.localizedDescription) }
+        var pending = ""
+        while true {
+            let d = out.fileHandleForReading.availableData       // ffmpeg writes a progress block every ~0.5 s
+            if cancel.isSet && p.isRunning { p.terminate() }
+            if d.isEmpty { break }
+            pending += String(decoding: d, as: UTF8.self)
+            while let nl = pending.firstIndex(of: "\n") { line(String(pending[..<nl])); pending = String(pending[pending.index(after: nl)...]) }
+        }
+        p.waitUntilExit()
+        err.fileHandleForReading.readabilityHandler = nil
+        let rest = err.fileHandleForReading.readDataToEndOfFile()
+        try? out.fileHandleForReading.close(); try? err.fileHandleForReading.close()
+        lock.lock(); errors.append(rest); let text = String(decoding: errors, as: UTF8.self); lock.unlock()
+        return (p.terminationReason == .exit ? p.terminationStatus : -2, text)
+    }
+
+    /// Interleaved samples → floats (full scale ±1)
+    static func floats(_ d: Data, codec: String) -> [Float]? {
+        switch codec {
+        case "pcm_f32le":
+            return d.withUnsafeBytes { Array($0.bindMemory(to: Float.self).prefix(d.count / 4)) }
+        case "pcm_f64le":
+            return d.withUnsafeBytes { Array($0.bindMemory(to: Double.self).prefix(d.count / 8)).map { Float($0) } }
+        case "pcm_s16le":
+            return d.withUnsafeBytes { Array($0.bindMemory(to: Int16.self).prefix(d.count / 2)).map { Float($0) / 32768 } }
+        case "pcm_s32le":
+            return d.withUnsafeBytes { Array($0.bindMemory(to: Int32.self).prefix(d.count / 4)).map { Float(Double($0) / 2147483648) } }
+        case "pcm_s24le":
+            let n = d.count / 3
+            var out = [Float](repeating: 0, count: n)
+            d.withUnsafeBytes { raw in
+                let b = raw.bindMemory(to: UInt8.self)
+                for i in 0..<n {
+                    var v = Int32(b[3 * i]) | Int32(b[3 * i + 1]) << 8 | Int32(b[3 * i + 2]) << 16
+                    if v & 0x80_0000 != 0 { v -= 0x100_0000 }
+                    out[i] = Float(v) / 8_388_608
+                }
+            }
+            return out
+        case "pcm_u8":
+            return d.map { (Float($0) - 128) / 128 }
+        default: return nil
+        }
+    }
+
+    /// The source as JobRunner would have muxed it (same trim, same channel order), as interleaved float frames
+    private final class SourceFrames {
+        let channels: Int
+        private var wav: ByteSource?, wavCodec = "", members: [ByteSource] = [], memberCodec = "", bps = 0, pipe: PipeSource?
+        init(_ t: Track, plan: TrimPlan?) throws {
+            channels = t.channels
+            if t.isGroup {
+                let p = plan ?? TrimPlan(pad: 0, cut: 0, keep: t.groupTotal, total: t.groupTotal)
+                bps = t.groupBPS; memberCodec = t.codecKey
+                guard AudioTranscode.floats(Data(count: 0), codec: memberCodec) != nil else { throw AppError("can't read \(memberCodec)") }
+                for m in t.orderedMembers { members.append(try GroupSources.open(m, as: t.codecKey, bps: bps, pad: p.pad, cut: p.cut, keep: p.keep)) }
+            } else if t.isPCM, let w = t.wav {
+                let total = w.dataSize / max(w.blockAlign, 1)
+                let p = plan ?? TrimPlan(pad: 0, cut: 0, keep: total, total: total)
+                wavCodec = t.codecKey
+                guard AudioTranscode.floats(Data(count: 0), codec: wavCodec) != nil else { throw AppError("can't read \(wavCodec)") }
+                wav = try WavRangeSource(t.url, info: w, pad: p.pad, cut: p.cut, keep: p.keep, order: t.channelPermutation)
+                bps = w.blockAlign / max(t.channels, 1)
+            } else {
+                pipe = try PipeSource(["-i", t.url.path, "-map", "0:\(t.streamIndex)", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
+            }
+        }
+        /// up to `n` frames (empty = the end)
+        func read(_ n: Int) throws -> [Float] {
+            if let wav {
+                let d = try GroupSources.readExactly(wav, n * channels * bps)
+                return AudioTranscode.floats(d.prefix(d.count / (channels * bps) * channels * bps), codec: wavCodec) ?? []
+            }
+            if !members.isEmpty {
+                var parts: [[Float]] = []
+                for m in members { parts.append(AudioTranscode.floats(try GroupSources.readExactly(m, n * bps), codec: memberCodec) ?? []) }
+                let f = parts.map(\.count).min() ?? 0
+                var out = [Float](repeating: 0, count: f * channels)
+                for (c, p) in parts.enumerated() { for i in 0..<f { out[i * channels + c] = p[i] } }
+                return out
+            }
+            guard let pipe else { return [] }
+            let d = try GroupSources.readExactly(pipe, n * channels * 4)
+            return AudioTranscode.floats(d.prefix(d.count / (channels * 4) * channels * 4), codec: "pcm_f32le") ?? []
+        }
+        func close() { try? wav?.finish(); for m in members { try? m.finish() }; pipe?.abort() }
+    }
+
     /// After the mux: lag 0 ± 1 sample against the trimmed source, per-channel level within ±0.1 dB, per-channel
     /// correlation > 0.9 (order unchanged). Returns ✓/✗ lines.
-    static func verify(final: URL, audioOrdinal: Int, source: Track, plan: TrimPlan?, to: AudioDelivery) -> [String] { [] }
+    /// The final track is decoded by ffmpeg (the edit list applied) and put back in the source's channel order by role; both
+    /// are read side by side: per channel the energy of each, and their products at lags −1, 0, +1; three windows of 32,768
+    /// samples (at 25, 50 and 75 %) give the lag by cross-correlation within ±4,096 samples.
+    static func verify(final: URL, audioOrdinal: Int, source: Track, plan: TrimPlan?, to: AudioDelivery) -> [String] {
+        let name = "Audio “\(source.title)” (\(targetText(source, to: to)))"
+        guard to != .copy else { return [] }
+        guard let roles = writtenRoles(source), let layout = outputLayout(roles, for: to) else { return ["\(name): the channels aren't identified — can't verify ✗"] }
+        _ = layout
+        let n = source.channels
+        // the final track's channels, put back in the source's order by their roles (as the file itself declares them)
+        let finals = Probe.raw(final)?.streams?.filter { $0.codec_type == "audio" } ?? []
+        guard audioOrdinal < finals.count else { return ["\(name): audio track \(audioOrdinal + 1) isn't in the final file ✗"] }
+        let fs = finals[audioOrdinal]
+        guard (fs.channels ?? 0) == n else { return ["\(name): the final file's track has \(fs.channels ?? 0) channels, the source \(n) ✗"] }
+        let finalRoles: [ChannelRole]? = fs.channel_layout.flatMap { AudioTranscode.roles(ofLayout: $0) } ?? (n == 1 ? [.M] : n == 2 ? [.L, .R] : nil)
+        var pick = Array(0..<n), declared = true
+        if let fr = finalRoles, fr.count == n, Set(fr) == Set(roles) { pick = roles.map { fr.firstIndex(of: $0)! } } else { declared = false }
+        let src: SourceFrames, out: PipeSource
+        do { src = try SourceFrames(source, plan: plan) } catch { return ["\(name): couldn't read the source — \(error.localizedDescription) ✗"] }
+        do {
+            let reorder = pick == Array(0..<n) ? [] : ["-af", "channelmap=map=" + pick.map(String.init).joined(separator: "|")]
+            out = try PipeSource(["-i", final.path, "-map", "0:a:\(audioOrdinal)"] + reorder + ["-c:a", "pcm_f32le", "-f", "f32le", "-"])
+        } catch { src.close(); return ["\(name): couldn't read the final file — \(error.localizedDescription) ✗"] }
+        let expected = plan.map { $0.pad + $0.keep } ?? (source.isGroup ? source.groupTotal : source.totalSamples)
+        let W = 32768, M = 4096
+        let windowStarts = [0.25, 0.5, 0.75].map { Int(Double(expected) * $0) }.filter { $0 >= M && $0 + W + M <= expected }
+        var winSrc = windowStarts.map { _ in [Float](repeating: 0, count: W) }
+        var winOut = windowStarts.map { _ in [Float](repeating: 0, count: W + 2 * M) }
+        var es = [Double](repeating: 0, count: n), eo = es, x0 = es, xp = es, xm = es    // xp: out late by 1, xm: out early by 1
+        var prevS = [Float](repeating: 0, count: n), prevO = prevS
+        var pos = 0, srcEnded = false, outFrames = 0, srcFrames = 0
+        let chunk = 1 << 16
+        do {
+            while true {
+                let a = srcEnded ? [] : try src.read(chunk)
+                if a.isEmpty { srcEnded = true }
+                let want = max(a.count, chunk * n)
+                let bd = try GroupSources.readExactly(out, want * 4)
+                let b = floats(bd.prefix(bd.count / (n * 4) * n * 4), codec: "pcm_f32le") ?? []
+                if a.isEmpty && b.isEmpty { break }
+                srcFrames += a.count / n; outFrames += b.count / n
+                let f = min(a.count, b.count) / n
+                if f > 0 {
+                    a.withUnsafeBufferPointer { ap in b.withUnsafeBufferPointer { bp in
+                        let s = ap.baseAddress!, o = bp.baseAddress!
+                        for c in 0..<n {
+                            var v: Float = 0
+                            vDSP_dotpr(s + c, vDSP_Stride(n), s + c, vDSP_Stride(n), &v, vDSP_Length(f)); es[c] += Double(v)
+                            vDSP_dotpr(o + c, vDSP_Stride(n), o + c, vDSP_Stride(n), &v, vDSP_Length(f)); eo[c] += Double(v)
+                            vDSP_dotpr(s + c, vDSP_Stride(n), o + c, vDSP_Stride(n), &v, vDSP_Length(f)); x0[c] += Double(v)
+                            if f > 1 {
+                                vDSP_dotpr(s + c, vDSP_Stride(n), o + c + n, vDSP_Stride(n), &v, vDSP_Length(f - 1)); xp[c] += Double(v)
+                                vDSP_dotpr(s + c + n, vDSP_Stride(n), o + c, vDSP_Stride(n), &v, vDSP_Length(f - 1)); xm[c] += Double(v)
+                            }
+                            if pos > 0 { xp[c] += Double(prevS[c] * o[c]); xm[c] += Double(s[c] * prevO[c]) }
+                            prevS[c] = s[(f - 1) * n + c]; prevO[c] = o[(f - 1) * n + c]
+                        }
+                    } }
+                }
+                // the lag windows: the source's mono sum, and the final's with M frames of margin on each side
+                for (k, w0) in windowStarts.enumerated() {
+                    let s0 = max(pos, w0), s1 = min(pos + a.count / n, w0 + W)
+                    if s0 < s1 { for i in s0..<s1 { var v: Float = 0; for c in 0..<n { v += a[(i - pos) * n + c] }; winSrc[k][i - w0] = v } }
+                    let o0 = max(pos, w0 - M), o1 = min(pos + b.count / n, w0 + W + M)
+                    if o0 < o1 { for i in o0..<o1 { var v: Float = 0; for c in 0..<n { v += b[(i - pos) * n + c] }; winOut[k][i - w0 + M] = v } }
+                }
+                pos += f
+                if a.isEmpty && bd.count < want * 4 { break }     // the source has ended, and now the file too
+            }
+        } catch {
+            src.close(); out.abort()
+            return ["\(name): \(error.localizedDescription) ✗"]
+        }
+        src.close(); out.abort()
+        guard srcFrames > 0, outFrames > 0 else { return ["\(name): nothing could be read back — can't confirm ✗"] }
+        var lines: [String] = []
+        // 1. the lag
+        var lags: [Int] = []
+        for k in windowStarts.indices {
+            let c = SyncEngine.correlate(winSrc[k], winOut[k])
+            if let p = SyncEngine.peak(c, guardBand: 64), p.value >= 0.5 { lags.append(Int(p.index.rounded()) - M) }
+        }
+        let codecPad = to == .aac ? 2048 : 0
+        let lengthText: String
+        if outFrames == srcFrames { lengthText = "\(Fmt.int(srcFrames)) samples, the source's length" }
+        else if outFrames > srcFrames { lengthText = "\(Fmt.int(srcFrames)) samples + \(Fmt.int(outFrames - srcFrames)) of encoder padding at the end" }
+        else { lengthText = "\(Fmt.int(outFrames)) samples, \(Fmt.int(srcFrames - outFrames)) fewer than the source" }
+        let lengthOK = outFrames >= srcFrames && outFrames - srcFrames <= codecPad
+        var lag = 0
+        if lags.isEmpty {
+            lines.append("⚠ \(name): the lag couldn't be measured (too short or silent where it was checked) · \(lengthText)" + (lengthOK ? "" : " ✗"))
+        } else {
+            lag = Int(Fmt.median(lags.map(Double.init)).rounded())
+            let ok = abs(lag) <= 1 && lags.allSatisfy { abs($0 - lag) <= 1 }
+            let ms = Double(lag) / max(source.sampleRate, 1) * 1000
+            lines.append("\(name): " + (lag == 0 ? "in sync with the trimmed source — lag 0 samples" : "lag \(Fmt.int(lag)) samples (\(String(format: "%+.2f", ms)) ms) against the trimmed source") +
+                         " at \(lags.count) point\(lags.count == 1 ? "" : "s") · \(lengthText) " + (ok && lengthOK ? "✓" : "✗"))
+        }
+        // 2. the level of every channel, 3. the same channel in the same place
+        let label = roles.map(\.rawValue)
+        var levels: [String] = [], worst = 0.0, levelOK = true
+        var minCorr = 1.0, corrOK = true, bad: [String] = []
+        for c in 0..<n {
+            let silentS = es[c] / Double(srcFrames) < 1e-12, silentO = eo[c] / Double(outFrames) < 1e-12      // below −120 dBFS
+            if silentS && silentO { levels.append("\(label[c]) silent"); continue }
+            if silentS != silentO { levelOK = false; corrOK = false; levels.append("\(label[c]) " + (silentS ? "silent in the source, not in the file" : "silent in the file")); bad.append(label[c]); continue }
+            let db = 10 * log10(eo[c] / es[c])
+            worst = max(worst, abs(db))
+            if abs(db) > 0.1 { levelOK = false }
+            levels.append("\(label[c]) \(String(format: "%+.2f", db))")
+            let x = abs(lag) <= 1 ? (lag == 1 ? xp[c] : lag == -1 ? xm[c] : x0[c]) : x0[c]
+            let r = x / (es[c] * eo[c]).squareRoot()
+            minCorr = min(minCorr, r)
+            if r <= 0.9 { corrOK = false; bad.append("\(label[c]) \(String(format: "%.2f", r))") }
+        }
+        lines.append("\(name): level per channel " + (levelOK ? "within ±0.1 dB of the source" : "differs from the source by up to \(String(format: "%.2f", worst)) dB") +
+                     " (\(levels.joined(separator: " · ")) dB) " + (levelOK ? "✓" : "✗"))
+        lines.append("\(name): " + (corrOK ? "every channel matches the same channel of the source (correlation ≥ \(String(format: "%.3f", minCorr))) — order unchanged" + (declared ? "" : " (the file declares no layout: compared in order)") + " ✓"
+                                           : "channel\(bad.count == 1 ? "" : "s") \(bad.joined(separator: ", ")) don't match the same channel of the source (correlation ≤ 0.9) — channels swapped or changed ✗"))
+        return lines
+    }
 }
 
 // MARK: - Presets and the Transcode tab's model
@@ -1424,5 +1938,275 @@ final class TranscodeModel {
             if let z = insp.zidooLevel { print("ZIDOO: \(z.emoji) \(z.title)") }
         }
         return result.state == .failed ? 1 : 0
+    }
+}
+
+// MARK: - Engine self-test (Beta 2.0.0)
+
+/// `--selftest [--clips DIR] [--dv XML] [--out DIR] [--xml2 XML --mov2 MOV] [--skip-jobs]`: exercises the Beta 2.0.0 engine
+/// additions on the QC clips — the Dolby Vision analysis, the audio TRANSCODE (prepare → mux → verify), the planned stages
+/// against the stages a real run reports, the live findings and the temp-folder lock. Prints what it found; exit 1 when a
+/// check fails. Writes only into --out. (Wired into Entry by the integrator.)
+enum EngineSelfTest {
+    static func run(_ args: [String]) -> Int32 {
+        setvbuf(stdout, nil, _IOLBF, 0)
+        var clips = "qc/out/clips", dv = "qc/reference/dv-120f.xml", outDir = NSTemporaryDirectory() + "BROS-MUX-selftest"
+        var xml2: String?, mov2: String?, jobs = true
+        var i = 0
+        func next() -> String? { i += 1; return i < args.count ? args[i] : nil }
+        while i < args.count {
+            switch args[i] {
+            case "--clips": clips = next() ?? clips
+            case "--dv": dv = next() ?? dv
+            case "--out": outDir = next() ?? outDir
+            case "--xml2": xml2 = next()
+            case "--mov2": mov2 = next()
+            case "--skip-jobs": jobs = false
+            default: break
+            }
+            i += 1
+        }
+        let C = URL(fileURLWithPath: clips), out = URL(fileURLWithPath: outDir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        var failures = 0
+        func check(_ ok: Bool, _ what: String) { print("  \(ok ? "PASS" : "FAIL") \(what)"); if !ok { failures += 1 } }
+
+        // (a) metadata analysis
+        func analyse(_ xml: URL, picture: URL?, title: String) -> HDRSettings {
+            print("\n== Dolby Vision analysis: \(xml.lastPathComponent) + \(picture?.lastPathComponent ?? "no picture") — \(title)")
+            let hdr = HDRSettings()
+            let src = picture.flatMap { SourceVideo.read($0) }
+            hdr.applySourceMastering(src?.mi)
+            hdr.dvSource = .xml(xml); hdr.dolbyVision = true; hdr.encode = true
+            let t0 = Date()
+            hdr.checkDolbyVisionNow(width: src?.width ?? 0, height: src?.height ?? 0, frames: src?.frames ?? 0)
+            print(String(format: "  dovi_tool generate + info: %.1f s", Date().timeIntervalSince(t0)))
+            if let s = hdr.dvSummary {
+                print("  summary: \(s.line)")
+                print("  profile=\(s.profile ?? "nil") level5=\(s.level5 ?? "nil") L1 MaxCLL=\(s.l1MaxCLL.map(String.init) ?? "nil") MaxFALL=\(s.l1MaxFALL.map(String.init) ?? "nil") rate=\(s.rate.map { String($0) } ?? "nil") primaries=\(s.primaries ?? "nil") · L6 MaxCLL=\(s.maxCLL.map(String.init) ?? "nil") MaxFALL=\(s.maxFALL.map(String.init) ?? "nil")")
+            } else { print("  problem: \(hdr.dvProblem ?? "?")") }
+            var lb: MetadataAnalysis.Letterbox?
+            if let src {
+                let t1 = Date()
+                lb = MetadataAnalysis.measureLetterbox(video: src.url, index: src.streamIndex, duration: src.duration, cancel: CancelFlag())
+                print(String(format: "  letterbox (cropdetect, %.1f s): ", Date().timeIntervalSince(t1)) + (lb.map { "\($0.width)×\($0.height) top \($0.top) bottom \($0.bottom) left \($0.left) right \($0.right)" } ?? "nil"))
+            }
+            for c in MetadataAnalysis.dolbyVision(hdr, picture: src, frames: src?.frames ?? 0, fps: src?.fps.value ?? 0, letterbox: lb) { show(c) }
+            return hdr
+        }
+        func show(_ c: MetadataCheck) {
+            let mark = c.level == .ok ? "✓" : c.level == .warn ? "⚠" : c.level == .fail ? "✕" : "·"
+            print("    \(mark) \(c.title) → \(c.detail)" + (c.fix.map { "  [fix: \($0)]" } ?? ""))
+        }
+        let dvURL = URL(fileURLWithPath: dv)
+        let hevc = C.appendingPathComponent("hevc10_pq2020.mov"), p3 = C.appendingPathComponent("prores4444_p3pq.mov")
+        do {
+            let h = analyse(dvURL, picture: hevc, title: "BT.2020 picture")
+            let lines = MetadataAnalysis.dolbyVision(h, picture: SourceVideo.read(hevc), frames: 120, fps: 24, letterbox: MetadataAnalysis.Letterbox(width: 1920, height: 1080, top: 0, bottom: 0, left: 0, right: 0))
+            check(!lines.contains { $0.level == .fail }, "dv-120f.xml + hevc10_pq2020.mov: no ✕")
+            check(h.dvSummary?.rate == 24 && h.dvSummary?.primaries == "P3-D65" && h.dvSummary?.profile == "8" && h.dvSummary?.l1MaxCLL != nil && h.dvSummary?.level5 != nil,
+                  "summary fields: rate 24, primaries P3-D65, profile 8, L1 and L5 read")
+            print("\n  -- the same XML before the picture is known:")
+            let waiting = MetadataAnalysis.dolbyVision(h, picture: nil, frames: 0, fps: 0, letterbox: nil)
+            waiting.forEach(show)
+            check(!waiting.contains { $0.level == .ok && ($0.title.hasPrefix("Frames") || $0.title.hasPrefix("Frame rate") || $0.title.hasPrefix("Level 5") || $0.title.hasPrefix("Master")) }
+                  && waiting.filter { $0.detail == MetadataAnalysis.waiting }.count >= 4, "without the picture: frames, rate, Level 5, master say “Waiting for the picture…”, never ✓")
+            print("\n  -- the same XML against a picture of 100 frames:")
+            let short = MetadataAnalysis.dolbyVision(h, picture: SourceVideo.read(hevc), frames: 100, fps: 25, letterbox: nil)
+            short.forEach(show)
+            check(short.contains { $0.level == .fail && $0.fix == .copyText("Please send a Dolby Vision XML of 100 frames at 25 fps") }, "frames mismatch: ✕ with “Please send a Dolby Vision XML of 100 frames at 25 fps”")
+        }
+        do {
+            let h = analyse(dvURL, picture: p3, title: "P3-D65 picture")
+            let src = SourceVideo.read(p3)
+            check(MetadataAnalysis.dolbyVision(h, picture: src, frames: 120, fps: 24, letterbox: nil).contains { $0.level == .ok && $0.fix == .keepSourcePrimaries && $0.detail.hasPrefix("Will be converted to BT.2020") },
+                  "P3-D65 master, conversion on: ✓ “Will be converted to BT.2020…” with [Keep source primaries]")
+            h.convertGamut = false
+            h.rateMode = .average; h.qualityFloor = true
+            print("\n  -- conversion off, Average with the quality floor on:")
+            let l = MetadataAnalysis.dolbyVision(h, picture: src, frames: 120, fps: 24, letterbox: nil)
+            l.forEach(show)
+            check(l.contains { $0.level == .warn && $0.fix == .convertGamut }, "conversion off: ⚠ with [Convert to BT.2020]")
+            check(l.contains { $0.level == .warn && $0.fix == .qualityFloorOff && $0.detail.contains("274–305 Mbps") }, "quality floor on with Average: ⚠ with [Turn the quality floor off]")
+        }
+        if let xml2 {
+            let h = analyse(URL(fileURLWithPath: xml2), picture: mov2.map { URL(fileURLWithPath: $0) }, title: "the 2DIE4")
+            let src = mov2.flatMap { SourceVideo.read(URL(fileURLWithPath: $0)) }
+            let lines = MetadataAnalysis.dolbyVision(h, picture: src, frames: src?.frames ?? 0, fps: src?.fps.value ?? 0, letterbox: nil)
+            check(lines.contains { $0.level == .warn && $0.fix == .useMeasuredLight }, "2DIE4: L6 MaxCLL/MaxFALL = 0 → ⚠ [Use the values measured from L1]")
+            if src != nil { check(lines.contains { $0.level == .ok && $0.fix == .keepSourcePrimaries }, "2DIE4: P3-D65/PQ master → ✓ converted to BT.2020 [Keep source primaries]") }
+            h.maxCLL = h.dvSummary?.l1MaxCLL ?? 0; h.maxFALL = h.dvSummary?.l1MaxFALL ?? 0
+            print("\n  -- after [Use the values measured from L1]:")
+            MetadataAnalysis.dolbyVision(h, picture: src, frames: src?.frames ?? 0, fps: src?.fps.value ?? 0, letterbox: nil).filter { $0.title.contains("L6") || $0.title.contains("light") }.forEach(show)
+        }
+
+        // (b) audio TRANSCODE: prepare → JobRunner (bit-exact mux of the result) → verify
+        let video = C.appendingPathComponent("h264_709.mov")
+        func audioTrack(_ u: URL) -> Track? { Probe.tracks(for: u).tracks.first { $0.kind == .audio } }
+        func mux(_ a: URL, name: String, mov: Bool) -> URL? {
+            guard let v = Probe.tracks(for: video).tracks.first(where: { $0.kind == .video }), let t = audioTrack(a) else { return nil }
+            let o = out.appendingPathComponent(name)
+            try? FileManager.default.removeItem(at: o)
+            let spec = JobSpec(tracks: [v, t], plans: [:], output: o, disableExtraAudio: false, interleaveMs: 500, writeChannelMap: true,
+                               verifyAudio: true, verifyVideo: false, fixColorTag: false, isMOV: mov, reference: nil, pictureCheck: false)
+            let r = JobRunner(spec).run()
+            print("  mux → \(o.lastPathComponent): \(r.state)"); r.lines.forEach { print("     • \($0)") }
+            return r.output
+        }
+        func transcode(_ t: Track, plan: TrimPlan?, to: AudioDelivery, index: Int, container mov: Bool, wrongPlan: TrimPlan? = nil, wrongSource: Track? = nil) {
+            print("\n== Audio \(AudioTranscode.targetText(t, to: to)): “\(t.title)” (\(t.codecName), \(t.isGroup ? "\(t.members.count) mono files" : t.url.lastPathComponent))" + (plan.map { " · cut \($0.cut) pad \($0.pad) keep \($0.keep)" } ?? ""))
+            if let p = AudioTranscode.problem(t, to: to) { print("  problem: \(p)") }
+            do {
+                let t0 = Date()
+                var last = -1.0
+                let a = try AudioTranscode.prepare(t, plan: plan, to: to, folder: out, index: index, cancel: CancelFlag()) { p in
+                    if p < last - 1e-9 { print("  FAIL progress went back \(last) → \(p)"); failures += 1 }
+                    last = p
+                }
+                print(String(format: "  prepare → %@ (%.1f s)", a.lastPathComponent, Date().timeIntervalSince(t0)))
+                let probe = Probe.raw(a)?.streams?.first
+                print("  file: \(probe?.codec_name ?? "?") · \(probe?.channels ?? 0) ch · \(probe?.channel_layout ?? "?") · \(probe?.sample_rate ?? "?") Hz" + (probe?.bit_rate.map { " · \($0) bps" } ?? ""))
+                guard let final = mux(a, name: "selftest-audio\(index).\(mov ? "mov" : "mp4")", mov: mov) else { check(false, "the mux of \(a.lastPathComponent)"); return }
+                let t1 = Date()
+                let lines = AudioTranscode.verify(final: final, audioOrdinal: 0, source: t, plan: plan, to: to)
+                print(String(format: "  verify (%.1f s):", Date().timeIntervalSince(t1)))
+                lines.forEach { print("     • \($0)") }
+                check(!lines.isEmpty && lines.allSatisfy { $0.hasSuffix("✓") }, "verify: lag, level and channels ✓")
+                if let w = wrongPlan {
+                    let bad = AudioTranscode.verify(final: final, audioOrdinal: 0, source: t, plan: w, to: to)
+                    print("  verify against a source trimmed \(w.cut - (plan?.cut ?? 0)) samples differently (must fail):")
+                    bad.forEach { print("     • \($0)") }
+                    check(bad.contains { $0.hasSuffix("✗") }, "verify catches a wrong trim")
+                }
+                if let w = wrongSource {
+                    let bad = AudioTranscode.verify(final: final, audioOrdinal: 0, source: w, plan: plan, to: to)
+                    print("  verify against a source whose C and LFE are swapped (must fail):")
+                    bad.forEach { print("     • \($0)") }
+                    check(bad.contains { $0.hasSuffix("✗") && $0.contains("swapped") }, "verify catches swapped channels")
+                }
+            } catch { print("  prepare threw: \(error.localizedDescription)"); check(false, "prepare") }
+        }
+        let monos = ["L", "R", "C", "LFE", "Ls", "Rs"].compactMap { audioTrack(C.appendingPathComponent("tone.\($0).wav")) }
+        if monos.count == 6, var g = Track.group(monos) {
+            g.title = "PCM 5.1 (6 mono files)"
+            print("\n  group roles: \(g.sourceOrder?.text ?? "nil") (\(g.rolesSource ?? "")) · written \(AudioTranscode.writtenRoles(g).map { ChannelOrder(roles: $0).text } ?? "nil")")
+            let total = g.groupTotal
+            var swapped = g
+            swapped.channelRoles = [.L, .R, .LFE, .C, .Ls, .Rs]       // mislabelled: the C file called LFE and the other way round
+            transcode(g, plan: TrimPlan(pad: 0, cut: 4800, keep: total - 4800, total: total), to: .aac, index: 1, container: false,
+                      wrongPlan: TrimPlan(pad: 0, cut: 5280, keep: total - 5280, total: total), wrongSource: swapped)
+            // Film order written (L C R Ls Rs LFE): the samples are permuted like JobRunner does, then each channel keeps its role
+            var film = g
+            film.channelTarget = ChannelOrder(roles: [.L, .C, .R, .Ls, .Rs, .LFE])
+            print("\n  film-order group: permutation \(film.channelPermutation.map { "\($0)" } ?? "nil")")
+            transcode(film, plan: nil, to: .aac, index: 2, container: true)
+            check(AudioTranscode.problem(g, to: .pcm24) != nil, "PCM 24-bit of a 24-bit group is refused (COPY is the same samples): \(AudioTranscode.problem(g, to: .pcm24) ?? "")")
+        } else { check(false, "the six mono tone files make a group") }
+        if let guide = audioTrack(C.appendingPathComponent("guide.wav")) {
+            let total = guide.totalSamples
+            transcode(guide, plan: TrimPlan(pad: 0, cut: 4800, keep: total - 4800, total: total), to: .aac, index: 3, container: false)
+        }
+        // a float source: PCM 24-bit when it fits, refused when it peaks above 0 dBFS
+        let f32 = out.appendingPathComponent("guide_f32.wav"), hot = out.appendingPathComponent("guide_hot_f32.wav")
+        _ = Tools.runAll(Tools.ffmpeg ?? "ffmpeg", ["-nostdin", "-v", "error", "-y", "-i", C.appendingPathComponent("guide.wav").path, "-c:a", "pcm_f32le", f32.path])
+        _ = Tools.runAll(Tools.ffmpeg ?? "ffmpeg", ["-nostdin", "-v", "error", "-y", "-i", C.appendingPathComponent("guide.wav").path, "-af", "volume=12dB", "-c:a", "pcm_f32le", hot.path])
+        if let t = audioTrack(f32) {
+            let total = t.totalSamples
+            transcode(t, plan: TrimPlan(pad: 2400, cut: 0, keep: total, total: total), to: .pcm24, index: 4, container: true)
+        }
+        if let t = audioTrack(hot) {
+            print("\n== Audio PCM 24-bit of a float source peaking above 0 dBFS")
+            print("  peak: \(AudioTranscode.measureFloatPeak(t, cancel: CancelFlag()).map { String(format: "%+.2f dBFS", $0) } ?? "?")")
+            let p = AudioTranscode.problem(t, to: .pcm24)
+            print("  problem: \(p ?? "nil")")
+            check(p != nil, "a float source above 0 dBFS is refused for PCM 24-bit")
+            check(AudioTranscode.problem(t, to: .aac) == nil, "… and still allowed for AAC")
+        }
+
+        // (c) planned stages against what a real run reports
+        func stages(_ label: String, _ a: [String]) {
+            print("\n== Planned stages: \(label)")
+            let project = buildProject(CLIArgs(a), output: CLIArgs(a).output)
+            guard let spec = project.jobSpec else { check(false, "\(label): a job"); return }
+            let planned = JobRunner.plannedStages(spec)
+            print("  planned: " + planned.map { String(format: "%@ %.1f s", $0.stage.rawValue, $0.weight) }.joined(separator: " → "))
+            guard jobs else { return }
+            let r = JobRunner(spec)
+            let lock = NSLock()
+            var seen: [JobProgress.Stage] = [], frac: [JobProgress.Stage: Double] = [:], back = 0, findings: [String] = [], folder: URL?, lockOK = false
+            var encode: JobProgress?
+            r.onProgress = { p in
+                lock.lock(); defer { lock.unlock() }
+                if seen.last != p.stage { seen.append(p.stage); frac[p.stage] = 0 }
+                if p.fraction + 1e-9 < (frac[p.stage] ?? 0) { back += 1 }
+                frac[p.stage] = p.fraction
+                if [.encode, .pass2].contains(p.stage), (p.frame ?? 0) > 0 { encode = p }
+            }
+            r.onFinding = { l in lock.lock(); findings.append(l); lock.unlock() }
+            r.onWorkFolder = { u in
+                folder = u
+                lockOK = JobRunner.TempLock.liveOwner(of: u) == getpid()
+                JobRunner.removeStaleTemps(in: u.deletingLastPathComponent())          // must leave our running folder alone
+                lockOK = lockOK && FileManager.default.fileExists(atPath: u.path)
+            }
+            let res = r.run()
+            print("  ran:     " + seen.map(\.rawValue).joined(separator: " → ") + " · \(res.state)")
+            check(seen == planned.map(\.stage), "\(label): the stages reported are the planned ones")
+            check(back == 0, "\(label): no fraction went back inside a stage (\(back))")
+            check(findings.sorted() == res.lines.sorted(), "\(label): onFinding gave every result line, as it came (\(findings.count)/\(res.lines.count))")
+            check(folder != nil && lockOK, "\(label): onWorkFolder came, its .lock names this process and removeStaleTemps kept it")
+            check(folder.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false, "\(label): the temporary folder is gone after the run")
+            if let e = encode {
+                print("  encode progress: frame \(e.frame ?? 0)/\(e.totalFrames ?? 0) · fps \(e.fps.map { String($0) } ?? "nil") · \(e.bitrateKbps.map { "\($0) Kbps" } ?? "bitrate nil") · speed \(e.speed.map { String($0) } ?? "nil") · \(e.outBytes.map { "\($0) bytes" } ?? "nil") · “\(e.title)”")
+            }
+        }
+        let o = out.path
+        stages("stereo guide (MOV)", ["--video", C.appendingPathComponent("h264_709.mov").path, "--add", C.appendingPathComponent("guide.wav").path, "--no-picture-check", "-o", o + "/st-stereo.mov"])
+        stages("6 monos → 5.1, picture check (MP4)", ["--video", C.appendingPathComponent("h264_709.mov").path] + ["L", "R", "C", "LFE", "Ls", "Rs"].flatMap { ["--add", C.appendingPathComponent("tone.\($0).wav").path] } + ["--mp4", "-o", o + "/st-group.mp4"])
+        stages("guide 100 ms late, trimmed (MKV)", ["--video", C.appendingPathComponent("h264_709.mov").path, "--add", C.appendingPathComponent("guide_late100ms.wav").path, "--trim-ms", "100", "--no-picture-check", "--mkv", "-o", o + "/st-trim.mkv"])
+        stages("HDR10 2-pass + Dolby Vision (MP4)", ["--video", hevc.path, "--encode", "--dv", dvURL.path, "--speed", "fast", "--rate", "2pass", "--mbps", "20", "--no-picture-check", "-o", o + "/st-dv.mp4"])
+
+        // TranscodeRunner
+        func transcodeStages(_ label: String, source: URL, preset: TranscodePreset, container: Container, dv: URL?, name: String) {
+            print("\n== Planned stages: Transcode \(label)")
+            guard let src = SourceVideo.read(source) else { check(false, "\(label): the source"); return }
+            let plan = TranscodeModel.plan(source: src, preset: preset, resolution: .same, toneMap: false, container: container, quality: nil, speed: nil,
+                                           audio: nil, dv: dv, hdr10plus: nil, mi: src.mi)
+            let planned = TranscodeRunner.plannedStages(plan, runQC: true, runVMAF: false)
+            print("  planned: " + planned.map { String(format: "%@ %.1f s", $0.stage.rawValue, $0.weight) }.joined(separator: " → "))
+            guard jobs else { return }
+            let o = out.appendingPathComponent(name)
+            let tr = TranscodeRunner(plan: plan, output: o, runQC: true, runVMAF: false)
+            var seen: [JobProgress.Stage] = [], findings: [String] = [], folders = 0
+            let lock = NSLock()
+            tr.onProgress = { p in lock.lock(); if seen.last != p.stage { seen.append(p.stage) }; lock.unlock() }
+            tr.onFinding = { l in lock.lock(); findings.append(l); lock.unlock() }
+            tr.onWorkFolder = { _ in lock.lock(); folders += 1; lock.unlock() }
+            try? FileManager.default.removeItem(at: o)
+            let res = tr.run()
+            print("  ran:     " + seen.map(\.rawValue).joined(separator: " → ") + " · \(res.state) · work folders \(folders)")
+            check(seen == planned.map(\.stage), "transcode \(label): the stages reported are the planned ones")
+            check(findings.sorted() == res.lines.sorted(), "transcode \(label): onFinding gave every result line, as it came (\(findings.count)/\(res.lines.count))")
+        }
+        transcodeStages("H.264 → ProRes 422 HQ, Render QC", source: video, preset: .prores422HQ, container: .mov, dv: nil, name: "st-transcode.mov")
+        transcodeStages("HEVC PQ → HEVC Dolby Vision (the inner JobRunner), Render QC", source: hevc, preset: .hevcDolbyVision, container: .mp4, dv: dvURL, name: "st-transcode-dv.mp4")
+
+        // the lock: a stale folder of a dead process goes, a folder of a live one stays
+        print("\n== Temporary folders")
+        let fm = FileManager.default
+        let live = out.appendingPathComponent(".BROS-MUX-tmp-selftest-live"), dead = out.appendingPathComponent(".BROS-MUX-tmp-selftest-dead")
+        for (u, pid) in [(live, getpid()), (dead, Int32(99_999))] {
+            try? fm.removeItem(at: u); try? fm.createDirectory(at: u, withIntermediateDirectories: true)
+            try? "\(pid)\n".write(to: u.appendingPathComponent(".lock"), atomically: false, encoding: .utf8)
+            try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -48 * 3600)], ofItemAtPath: u.path)
+        }
+        let deadAlive = kill(99_999, 0) == 0
+        JobRunner.removeStaleTemps(in: out)
+        check(fm.fileExists(atPath: live.path), "a 2-day-old folder whose .lock names a running process is kept")
+        if !deadAlive { check(!fm.fileExists(atPath: dead.path), "a 2-day-old folder whose .lock names a finished process is removed") }
+        try? fm.removeItem(at: live)
+
+        print("\nSELFTEST: \(failures == 0 ? "PASSED" : "\(failures) FAILED")")
+        return failures == 0 ? 0 : 1
     }
 }

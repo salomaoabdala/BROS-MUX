@@ -1776,30 +1776,31 @@ struct JobProgress: Codable, Equatable {
         case readMetadata, pass1, pass2, encode, injectHDR10Plus, injectDV, interleave, trim, mux, mkv, headers,
              verifyPicture, verifyBits, sync, picture, academy, transcodeVideo, transcodeAudio, checkResult,
              renderQC, vmaf, finalize
+        /// The stage's short name on the render page's timeline (the live text is JobProgress.title)
         var title: String {
             switch self {
-            case .readMetadata: return "Reading the metadata"
+            case .readMetadata: return "Reading the Dolby Vision metadata"
             case .pass1: return "Pass 1 of 2"
             case .pass2: return "Pass 2 of 2"
             case .encode: return "Encoding the picture"
-            case .injectHDR10Plus: return "Injecting HDR10+"
-            case .injectDV: return "Injecting Dolby Vision"
-            case .interleave: return "Joining the mono files"
+            case .injectHDR10Plus: return "Adding the HDR10+ metadata"
+            case .injectDV: return "Adding the Dolby Vision metadata"
+            case .interleave: return "Joining the mono channels"
             case .trim: return "Trimming the audio"
             case .mux: return "Muxing"
             case .mkv: return "Writing the MKV"
             case .headers: return "Writing the headers"
-            case .verifyPicture: return "Verifying the picture"
+            case .verifyPicture: return "Checking the encoded picture"
             case .verifyBits: return "Verifying bit for bit"
             case .sync: return "Checking the sync"
-            case .picture: return "Checking the sound against the picture"
-            case .academy: return "Checking the Academy specs"
+            case .picture: return "Picture check"
+            case .academy: return "Academy check"
             case .transcodeVideo: return "Transcoding the picture"
             case .transcodeAudio: return "Transcoding the audio"
             case .checkResult: return "Checking the result"
             case .renderQC: return "Render QC"
             case .vmaf: return "VMAF"
-            case .finalize: return "Finishing"
+            case .finalize: return "Moving into place"
             }
         }
     }
@@ -1819,18 +1820,197 @@ final class JobRunner {
     let cancel = CancelFlag()
     var onStage: (String, Double) -> Void = { _, _ in }
     var onLog: (String) -> Void = { _ in }
-    // Beta 2.0.0 (nil by default; called off the main thread, never block). Wave 0: declared, not called yet.
+    // Beta 2.0.0 — nil by default. They are called off the main thread (the run thread, MP4Box's reader queue, ffmpeg's
+    // reader queue) and nothing waits on them: they must return at once (hop to main with async, never sync).
+    /// Where the job is: one stage of `plannedStages(spec)` after the other, in that order. `fraction` is the share done
+    /// of that planned stage (0…1); consecutive items with the same stage (two trims, the checks of several tracks) are
+    /// one planned stage and share it by weight. The encode passes carry frames, fps, bitrate and bytes written; the
+    /// prepare copies and MP4Box carry bytes. `title` is the text onStage gets (or the same wording when only this fires).
     var onProgress: ((JobProgress) -> Void)?
-    var onFinding: ((String) -> Void)?                // each ✓/⚠/✗ line the moment it is produced (live view only)
-    var onWorkFolder: ((URL) -> Void)?                // the .BROS-MUX-tmp folder once created
+    /// Every line the moment it goes into the result — the prepare notes and the ✓/⚠/✗ checks, inserted ones included —
+    /// in the order they arrive; the lines only a failure or a cancel adds come when run() returns. Live view only:
+    /// JobResult.lines is unchanged.
+    var onFinding: ((String) -> Void)?
+    /// The .BROS-MUX-tmp folder once created (it holds `.lock` with this process's pid)
+    var onWorkFolder: ((URL) -> Void)?
     private let lock = NSLock()
     private var mp4boxProcess: Process?
     private var encodedRPU: URL?          // the Dolby Vision metadata that went into the picture (to read it back after muxing)
+    private var findingsSent: [String] = []                                            // lines onFinding already had
+    private var spans: [String: (before: Double, weight: Double, total: Double)] = [:]  // an item's place in its planned stage
+    private var muxShown = 0.0                                                          // MP4Box's fraction never goes back
 
     init(_ spec: JobSpec) { self.spec = spec }
 
-    /// The stages this job will go through, with their weight in the overall % (wave 0: none yet)
-    static func plannedStages(_ spec: JobSpec) -> [(stage: JobProgress.Stage, weight: Double)] { [] }
+    // MARK: Beta 2.0.0 — the stages a job will go through, with time weights
+
+    /// Weights are seconds-equivalent, so the Delivery's overall % moves with time (it re-times them with the speeds it measures):
+    /// • picture encode: TranscodePlan.estimatedSeconds (its x265 fps per preset at UHD); 2-pass: pass 2 = estimate ÷ 1.35
+    ///   and pass 1 = 35 % of pass 2 — the split the estimate itself assumes (fps4K ÷ 1.35 in the average mode);
+    /// • reading the Dolby Vision metadata: 2 s + 1 s per 50,000 frames (dovi_tool generate and info took ~1 s each on the
+    ///   2DIE4's 86,624-frame, 127 MB XML — measured 2026-11-05);
+    /// • adding HDR10+ / Dolby Vision: the encoded picture read and written once — its bytes at 250 MB/s;
+    /// • writing (mono interleave, trims, MP4Box, the MKV copy): bytes at ≈ 500 MB/s; verifying bit for bit and reading the
+    ///   metadata back: bytes at ≈ 1 GB/s;
+    /// • fixed: headers 1 s · checking the encoded picture 3 s (+ the read-backs) · sync 5 s per audio track (9 points) ·
+    ///   picture check 30 s for the hard cuts + 3 s per audio track · moving into place 0.5 s · the Academy check 5 s.
+    static let writeBytesPerSecond = 500e6
+    static let readBytesPerSecond = 1e9
+    static let injectBytesPerSecond = 250e6
+
+    /// One step of the plan; `key` names the steps that share a planned stage (prepare<i>, verify<n>, sync<n>, cuts, picture<n>)
+    struct PlannedItem { let stage: JobProgress.Stage; let weight: Double; let key: String? }
+
+    /// The stages this job will go through, with their weight in the overall % — exactly the stages run() reports through
+    /// onProgress, in order (consecutive equal stages are one entry)
+    static func plannedStages(_ spec: JobSpec) -> [(stage: JobProgress.Stage, weight: Double)] { merged(plannedItems(spec)) }
+
+    static func merged(_ items: [PlannedItem]) -> [(stage: JobProgress.Stage, weight: Double)] {
+        var out: [(stage: JobProgress.Stage, weight: Double)] = []
+        for it in items {
+            if let last = out.last, last.stage == it.stage { out[out.count - 1].weight += it.weight }
+            else { out.append((it.stage, it.weight)) }
+        }
+        return out
+    }
+
+    /// Where each keyed step sits inside its planned stage (weight before it, its own, the stage's total)
+    static func spans(_ items: [PlannedItem]) -> [String: (before: Double, weight: Double, total: Double)] {
+        var out: [String: (before: Double, weight: Double, total: Double)] = [:]
+        var i = 0
+        while i < items.count {
+            var j = i
+            while j + 1 < items.count && items[j + 1].stage == items[i].stage { j += 1 }
+            let total = items[i...j].reduce(0) { $0 + $1.weight }
+            var before = 0.0
+            for k in i...j {
+                if let key = items[k].key { out[key] = (before, items[k].weight, total) }
+                before += items[k].weight
+            }
+            i = j + 1
+        }
+        return out
+    }
+
+    /// The stages of the picture encode, in encodeElementary's order
+    static func encodeItems(_ e: TranscodePlan) -> [PlannedItem] {
+        var items: [PlannedItem] = []
+        if e.hdr?.dolbyVision != nil { items.append(.init(stage: .readMetadata, weight: 2 + Double(e.frames) / 50_000, key: nil)) }
+        let est = e.estimatedSeconds
+        if let r = e.video.rate, r.mode == .average, e.encoder == "libx265" {
+            items.append(.init(stage: .pass1, weight: 0.35 * est / 1.35, key: nil))
+            items.append(.init(stage: .pass2, weight: est / 1.35, key: nil))
+        } else {
+            items.append(.init(stage: .encode, weight: est, key: nil))
+        }
+        let inject = e.estimatedBytes / injectBytesPerSecond
+        if e.hdr?.hdr10plus != nil && Tools.hdr10plusTool != nil { items.append(.init(stage: .injectHDR10Plus, weight: inject, key: nil)) }
+        if e.hdr?.dolbyVision != nil && Tools.doviTool != nil { items.append(.init(stage: .injectDV, weight: inject, key: nil)) }
+        return items
+    }
+
+    /// Checking the encoded picture: MediaInfo, then the Dolby Vision / HDR10+ metadata read back from the final file
+    static func verifyPictureWeight(_ e: TranscodePlan) -> Double {
+        3 + (e.hdr?.dolbyVision != nil && Tools.doviTool != nil ? e.estimatedBytes / readBytesPerSecond : 0)
+          + (e.hdr?.hdr10plus != nil && Tools.hdr10plusTool != nil ? e.estimatedBytes / readBytesPerSecond : 0)
+    }
+
+    /// What prepare() reports for a track that isn't the encoded picture, and the bytes it writes (nil: a plain link, silent)
+    static func prepareStage(_ t: Track, _ spec: JobSpec) -> (stage: JobProgress.Stage, bytes: Double)? {
+        guard t.kind == .audio, let plan = spec.plans[t.id] else { return nil }
+        if t.isGroup { return (.interleave, Double((plan.pad + plan.keep) * t.channels * max(t.groupBPS, 1))) }
+        guard !plan.isIdentity || t.channelPermutation != nil else { return nil }
+        if t.isPCM, let wav = t.wav { return (.trim, Double((plan.pad + plan.keep) * wav.blockAlign)) }
+        if t.codecKey == "eac3" { return (.trim, estimatedBytes(t, plan: plan)) }
+        return nil
+    }
+
+    /// The tracks verified bit for bit after the mux
+    static func checkIndices(_ spec: JobSpec) -> [Int] {
+        spec.tracks.indices.filter { i in
+            let t = spec.tracks[i]
+            return (t.kind == .audio && spec.verifyAudio) || (t.kind == .video && spec.verifyVideo && spec.videoEncode == nil)
+        }
+    }
+
+    /// Every step run() will report, in order, with its weight
+    static func plannedItems(_ spec: JobSpec) -> [PlannedItem] {
+        var items: [PlannedItem] = []
+        let outBytes = spec.tracks.reduce(0.0) { $0 + estimatedBytes($1, plan: spec.plans[$1.id], encode: spec.videoEncode) }
+        for (i, t) in spec.tracks.enumerated() {
+            if t.kind == .video, let e = spec.videoEncode { items += encodeItems(e) }
+            else if let p = prepareStage(t, spec) { items.append(.init(stage: p.stage, weight: p.bytes / writeBytesPerSecond, key: "prepare\(i)")) }
+        }
+        items.append(.init(stage: .mux, weight: outBytes / writeBytesPerSecond, key: nil))
+        if spec.isMKV { items.append(.init(stage: .mkv, weight: outBytes / writeBytesPerSecond, key: nil)) }
+        if spec.isMOV { items.append(.init(stage: .headers, weight: 1, key: nil)) }
+        if let e = spec.videoEncode { items.append(.init(stage: .verifyPicture, weight: verifyPictureWeight(e), key: nil)) }
+        for (n, i) in checkIndices(spec).enumerated() {
+            let t = spec.tracks[i]
+            items.append(.init(stage: .verifyBits, weight: max(0.1, estimatedBytes(t, plan: spec.plans[t.id]) / readBytesPerSecond), key: "verify\(n)"))
+        }
+        let audios = spec.tracks.indices.filter { spec.tracks[$0].kind == .audio }
+        if spec.reference != nil { for n in audios.indices { items.append(.init(stage: .sync, weight: 5, key: "sync\(n)")) } }
+        if spec.pictureCheck, spec.tracks.contains(where: { $0.kind == .video }), !audios.isEmpty {
+            // run() checks the final file's own durations; the plan's lengths are the same numbers before the mux
+            let dur = audios.map { i -> Double in
+                let t = spec.tracks[i]
+                if let p = spec.plans[t.id], t.sampleRate > 0 { return Double(p.pad + p.keep) / t.sampleRate }
+                return t.duration
+            }.min() ?? 0
+            if dur > 10 {
+                items.append(.init(stage: .picture, weight: 30, key: "cuts"))
+                for n in audios.indices { items.append(.init(stage: .picture, weight: 3, key: "picture\(n)")) }
+            }
+        }
+        items.append(.init(stage: .finalize, weight: 0.5, key: nil))
+        items.append(.init(stage: .academy, weight: 5, key: nil))
+        return items
+    }
+
+    /// onProgress for a step: `f` inside the step, turned into the share of its planned stage when the step has a key
+    private func progress(_ stage: JobProgress.Stage, _ title: String, _ f: Double, key: String? = nil, outBytes: Int64? = nil) {
+        guard let onProgress else { return }
+        var x = min(max(f, 0), 1)
+        if let key, let s = spans[key], s.total > 0 { x = min(1, (s.before + x * s.weight) / s.total) }
+        onProgress(JobProgress(stage: stage, title: title, fraction: x, outBytes: outBytes))
+    }
+
+    /// onFinding for the lines that went into the result since `old` (appended or inserted)
+    private func found(_ new: [String], since old: [String]) {
+        guard onFinding != nil, new.count > old.count else { return }
+        var left: [String: Int] = [:]
+        for l in old { left[l, default: 0] += 1 }
+        for l in new {
+            if let n = left[l], n > 0 { left[l] = n - 1 } else { findingsSent.append(l); onFinding?(l) }
+        }
+    }
+
+    /// A temporary folder's `.lock`: the pid of the process using it, its date refreshed every 10 minutes while the job
+    /// runs. removeStaleTemps never deletes a folder whose lock names a live process — a 30-hour encode writes into one
+    /// file, so the folder's own date stops moving long before the job ends.
+    final class TempLock {
+        static let name = ".lock"
+        let file: URL
+        private let timer: DispatchSourceTimer
+        init(_ folder: URL) {
+            file = folder.appendingPathComponent(Self.name)
+            try? "\(getpid())\n".write(to: file, atomically: false, encoding: .utf8)
+            timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            timer.schedule(deadline: .now() + 600, repeating: 600, leeway: .seconds(30))
+            let path = file.path
+            timer.setEventHandler { try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path) }
+            timer.resume()
+        }
+        func release() { timer.cancel(); try? FileManager.default.removeItem(at: file) }
+        deinit { timer.cancel() }
+        /// The pid named in a folder's `.lock`, when that process is still running (nil: no lock, or its process is gone)
+        static func liveOwner(of folder: URL) -> Int32? {
+            guard let s = try? String(contentsOf: folder.appendingPathComponent(name), encoding: .utf8),
+                  let pid = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else { return nil }
+            return kill(pid, 0) == 0 || errno == EPERM ? pid : nil
+        }
+    }
 
     func requestCancel() {
         cancel.set()
@@ -1898,6 +2078,18 @@ final class JobRunner {
     }
 
     func run() -> JobResult {
+        findingsSent = []; muxShown = 0
+        spans = onProgress == nil ? [:] : Self.spans(Self.plannedItems(spec))
+        let r = runJob()
+        if onFinding != nil {      // the lines only a failure or a cancel adds (they never went through `lines`)
+            var seen: [String: Int] = [:]
+            for l in findingsSent { seen[l, default: 0] += 1 }
+            for l in r.lines { if let n = seen[l], n > 0 { seen[l] = n - 1 } else { onFinding?(l) } }
+        }
+        return r
+    }
+
+    private func runJob() -> JobResult {
         if let problem = Self.validate(spec) { return JobResult(state: .failed, lines: [problem], output: nil) }
         // an encode can take all night: keep the Mac awake until the job ends
         let activity = spec.videoEncode == nil ? nil :
@@ -1910,6 +2102,9 @@ final class JobRunner {
         let tmp = dir.appendingPathComponent(".BROS-MUX-tmp-\(UUID().uuidString)", isDirectory: true)
         do { try fm.createDirectory(at: tmp, withIntermediateDirectories: false) }
         catch { return JobResult(state: .failed, lines: ["Couldn't create the temporary folder: \(error.localizedDescription)"], output: nil) }
+        let tempLock = TempLock(tmp)          // Beta 2.0.0: removeStaleTemps leaves this folder alone while the job runs
+        defer { tempLock.release() }
+        onWorkFolder?(tmp)
         // MP4Box mis-parses some characters in paths (a '+' in the folder name made it drop the language/name options of
         // every input inside it), so it only ever sees safe paths: a symlink in the system temp folder → our temp folder,
         // which stays on the destination drive.
@@ -1930,7 +2125,7 @@ final class JobRunner {
 
         // 1. prepare inputs (sync trims and safe paths)
         var prepared: [Prepared] = []
-        var lines: [String] = []
+        var lines: [String] = [] { didSet { found(lines, since: oldValue) } }      // Beta 2.0.0: onFinding, live
         do {
             for (i, t) in spec.tracks.enumerated() {
                 let p = try prepare(t, index: i, tmp: tmp, gpacTmp: gpacTmp)
@@ -1953,6 +2148,7 @@ final class JobRunner {
         }
         if spec.isMKV {
             onStage("Copying the streams into Matroska (MKV)…", 0.97)
+            progress(.mkv, "Copying the streams into Matroska (MKV)…", 0)
             let mkv = tmp.appendingPathComponent("output.mkv")
             let args = Self.mkvArguments(spec, from: tmpOut, to: mkv)
             onLog("ffmpeg " + args.map { $0.contains(" ") ? "\"\($0)\"" : $0 }.joined(separator: " ") + "\n")
@@ -2002,26 +2198,29 @@ final class JobRunner {
                 fixes[ordinal] = f
             }
             onStage("Writing headers (channel labels, Dolby layout for QuickTime)…", 0)
+            progress(.headers, "Writing headers (channel labels, Dolby layout for QuickTime)…", 0)
             do { lines += try MoovPatcher.patch(tmpOut, audio: fixes, fixDolby: true) }
             catch { lines.append("⚠ Header fixes: \(error.localizedDescription)"); warn = true }
         }
 
-        let checks = spec.tracks.indices.filter { i in
-            let t = spec.tracks[i]
-            return (t.kind == .audio && spec.verifyAudio) || (t.kind == .video && spec.verifyVideo && spec.videoEncode == nil)
-        }
+        let checks = Self.checkIndices(spec)
         if let e = spec.videoEncode {
             onStage("Checking the encoded picture (frames, Dolby Vision, HDR10, HDR10+)…", 0)
-            let r = Transcode.verifyElementary(tmpOut, plan: e, rpu: encodedRPU, tmp: tmp, cancel: cancel) { s, p in self.onStage(s, p) }
+            progress(.verifyPicture, "Checking the encoded picture (frames, Dolby Vision, HDR10, HDR10+)…", 0)
+            let r = Transcode.verifyElementary(tmpOut, plan: e, rpu: encodedRPU, tmp: tmp, cancel: cancel) { s, p in self.onStage(s, p); self.progress(.verifyPicture, s, p) }
             if cancel.isSet { return cancelledResult }
             lines += r.lines
             if !r.ok { ok = false }
         }
         for (n, i) in checks.enumerated() {
             let t = spec.tracks[i]
+            let verifyBytes = onProgress == nil ? 0 : Self.estimatedBytes(t, plan: spec.plans[t.id])
+            progress(.verifyBits, "Verifying bit for bit \(n + 1) of \(checks.count): \(t.title)", 0, key: "verify\(n)", outBytes: 0)
             guard let s = outStream(for: i) else { lines.append("⚠ \(t.kind.label) “\(t.title)”: track not found in the final file ✗"); ok = false; continue }
             let r = Verifier.compare(t, source: prepared[i].verify, out: tmpOut, outStream: s, cancel: cancel) { p in
                 self.onStage("Verifying bit for bit \(n + 1) of \(checks.count): \(t.title)" + (p < 0 ? " (hashing the whole video…)" : ""), max(0, p))
+                self.progress(.verifyBits, "Verifying bit for bit \(n + 1) of \(checks.count): \(t.title)" + (p < 0 ? " (hashing the whole video…)" : ""), max(0, p), key: "verify\(n)",
+                              outBytes: p < 0 ? nil : Int64(p * verifyBytes))     // bytes of this track compared so far
             }
             lines.append(r.text)
             if !r.ok { ok = false }
@@ -2032,12 +2231,14 @@ final class JobRunner {
             let audios = spec.tracks.indices.filter { spec.tracks[$0].kind == .audio }
             for (n, i) in audios.enumerated() {
                 let t = spec.tracks[i]
+                progress(.sync, "Checking sync \(n + 1) of \(audios.count): \(t.title)", 0, key: "sync\(n)")
                 guard let s = outStream(for: i) else { continue }
                 let r = SyncEngine.measure(ref: SyncEngine.Source(ref),
                                            cand: .init(url: tmpOut, index: s.index, duration: Double(s.duration ?? "") ?? t.duration, channels: s.channels ?? t.channels),
                                            rate: Int(t.sampleRate > 0 ? t.sampleRate : 48000), maxLag: 10, points: 9,
                                            cancel: cancel) { p in
                     self.onStage("Checking sync \(n + 1) of \(audios.count): \(t.title)", p)
+                    self.progress(.sync, "Checking sync \(n + 1) of \(audios.count): \(t.title)", p, key: "sync\(n)")
                 }
                 if cancel.isSet { return cancelledResult }
                 if let lag = r.lag {
@@ -2063,14 +2264,17 @@ final class JobRunner {
             let dur = audios.compactMap { outStream(for: $0).flatMap { Double($0.duration ?? "") } }.min() ?? Double(vs.duration ?? "") ?? 0
             if dur > 10, !audios.isEmpty {
                 let segs = PictureSync.segments(duration: dur, points: 24, window: 30)
+                progress(.picture, "Checking the sound against the picture: finding hard cuts", 0, key: "cuts")
                 let cuts = PictureSync.detectCuts(video: tmpOut, index: vs.index, fps: fps, segments: segs, cancel: cancel) { p in
                     self.onStage("Checking the sound against the picture: finding hard cuts", p)
+                    self.progress(.picture, "Checking the sound against the picture: finding hard cuts", p, key: "cuts")
                 }
                 if cancel.isSet { return cancelledResult }
                 for (n, i) in audios.enumerated() {
                     let t = spec.tracks[i]
                     guard let s = outStream(for: i) else { continue }
                     self.onStage("Checking the sound against the picture \(n + 1) of \(audios.count): \(t.title)", 0.95)
+                    progress(.picture, "Checking the sound against the picture \(n + 1) of \(audios.count): \(t.title)", 0, key: "picture\(n)")
                     let src = SyncEngine.Source(url: tmpOut, index: s.index, duration: Double(s.duration ?? "") ?? dur, channels: s.channels ?? t.channels)
                     let r = PictureSync.match(cuts: cuts, curves: PictureSync.curvesFor(src, segments: segs, shift: 0), fps: fps)
                     if cancel.isSet { return cancelledResult }
@@ -2090,6 +2294,7 @@ final class JobRunner {
         // 4. move to the destination (rename on the same drive). A file that failed its own checks never replaces an
         //    existing delivery: it is kept beside it with a _FAILED name, so what was verified before stays intact.
         var finalOut = out
+        progress(.finalize, "Moving the file into place…", 0)
         if !ok && fm.fileExists(atPath: out.path) {
             let dir = out.deletingLastPathComponent(), base = out.deletingPathExtension().lastPathComponent, ext = out.pathExtension
             var n = 0
@@ -2103,6 +2308,7 @@ final class JobRunner {
             return JobResult(state: .failed, lines: lines + ["Couldn't move the final file into place: \(error.localizedDescription)"], output: nil)
         }
         onStage("Checking the final file against the Academy specs…", 1)
+        progress(.academy, "Checking the final file against the Academy specs…", 0)
         let insp = Inspection.analyze(finalOut)
         return JobResult(state: ok ? (warn ? .warning : .ok) : .failed, lines: lines, output: finalOut, inspection: insp)
     }
@@ -2122,7 +2328,8 @@ final class JobRunner {
     /// Files are written into `tmp` (on the destination drive); MP4Box gets the same files through `gpacTmp` (safe path).
     private func prepare(_ t: Track, index: Int, tmp: URL, gpacTmp: URL) throws -> Prepared {
         if t.kind == .video, let e = spec.videoEncode {
-            let r = try Transcode.encodeElementary(e, tmp: tmp, cancel: cancel, stage: { s, p in self.onStage(s, p) }, log: { self.onLog($0) })
+            let r = try Transcode.encodeElementary(e, tmp: tmp, cancel: cancel, stage: { s, p in self.onStage(s, p) }, log: { self.onLog($0) },
+                                                   progress: onProgress)
             encodedRPU = r.rpu
             return Prepared(path: gpacTmp.appendingPathComponent(r.hevc.lastPathComponent).path, selector: nil, rangeEnd: nil,
                             verify: .none, note: r.notes.joined(separator: "\n"), importOptions: e.importOptions(mov: spec.isMOV))
@@ -2140,8 +2347,12 @@ final class JobRunner {
             let order = t.channelPermutation != nil ? t.channelTarget : t.sourceOrder
             let fmt = GroupSources.fmtChunk(channels: t.channels, sampleRate: t.sampleRate, bps: bps, validBits: t.bitDepth, float: t.isFloatPCM,
                                             order: order?.isComplete == true ? order : nil)
+            let title = "Interleaving \(t.channels) mono \(what) into one \(chText) track “\(t.title)” (sample exact)…"
+            let bytes = Double((plan.pad + plan.keep) * t.channels * bps)
+            progress(.interleave, title, 0, key: "prepare\(index)", outBytes: 0)
             try GroupSources.writeInterleaved(sources, bps: bps, frames: plan.pad + plan.keep, fmt: fmt, to: dst, cancel: cancel) { p in
                 self.onStage("Interleaving \(t.channels) mono \(what) into one \(chText) track “\(t.title)” (sample exact)…", p)
+                self.progress(.interleave, title, p, key: "prepare\(index)", outBytes: Int64(p * bytes))
             }
             let sr = t.sampleRate
             var parts = ["\(t.channels) mono \(what) interleaved into one \(chText) PCM track"]
@@ -2159,8 +2370,11 @@ final class JobRunner {
                 let dst = tmp.appendingPathComponent("audio\(index).wav")
                 let order = t.channelPermutation
                 let what = order == nil ? "Trimming" : plan.isIdentity ? "Reordering the channels of" : "Trimming and reordering"
+                let bytes = Double((plan.pad + plan.keep) * wav.blockAlign)
+                progress(.trim, "\(what) “\(t.title)” (PCM, sample exact)…", 0, key: "prepare\(index)", outBytes: 0)
                 try WavInfo.writeTrimmed(wav, from: t.url, to: dst, pad: plan.pad, cut: plan.cut, keep: plan.keep, order: order, cancel: cancel) { p in
                     self.onStage("\(what) “\(t.title)” (PCM, sample exact)…", p)
+                    self.progress(.trim, "\(what) “\(t.title)” (PCM, sample exact)…", p, key: "prepare\(index)", outBytes: Int64(p * bytes))
                 }
                 let sr = t.sampleRate
                 var parts: [String] = []
@@ -2176,8 +2390,10 @@ final class JobRunner {
             }
             if t.codecKey == "eac3" {
                 let dst = tmp.appendingPathComponent("audio\(index).ec3")
+                progress(.trim, "Trimming “\(t.title)” (Dolby frames, no re-encoding)…", 0, key: "prepare\(index)")
                 let s = try EAC3.slice(t.url, index: t.streamIndex, cut: plan.cut, keep: plan.keep, to: dst, cancel: cancel) { p in
                     self.onStage("Trimming “\(t.title)” (Dolby frames, no re-encoding)…", p)
+                    self.progress(.trim, "Trimming “\(t.title)” (Dolby frames, no re-encoding)…", p, key: "prepare\(index)")
                 }
                 let sr = t.sampleRate > 0 ? t.sampleRate : 48000
                 let residual = Double(plan.cut - s.skippedSamples) / sr * 1000
@@ -2285,6 +2501,15 @@ final class JobRunner {
         let n = max(spec.tracks.count, 1)
         var importIndex = 0, lastPct = -1
         var pendingText = ""
+        let outPath = args.last ?? ""
+        /// Beta 2.0.0: the same fraction for onProgress (held so it never goes back), with the bytes of the file written so far
+        let mux: (String, Double) -> Void = { title, f in
+            guard let onProgress = self.onProgress else { return }
+            self.muxShown = max(self.muxShown, min(1, max(0, f)))
+            let size = (try? FileManager.default.attributesOfItem(atPath: outPath)[.size] as? NSNumber)?.int64Value
+            onProgress(JobProgress(stage: .mux, title: title, fraction: self.muxShown, outBytes: size))
+        }
+        mux("MP4Box: copying track 1 of \(n)", 0)
         let handle: (String) -> Void = { raw in
             let clean = JobRunner.ansi.stringByReplacingMatches(in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "")
             for line in clean.replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n") {
@@ -2296,13 +2521,15 @@ final class JobRunner {
                         if pct < lastPct { importIndex = min(importIndex + 1, n - 1) }
                         lastPct = pct
                         self.onStage("MP4Box: copying track \(importIndex + 1) of \(n)", (Double(importIndex) + Double(pct) / 100) / Double(n + 1))
+                        mux("MP4Box: copying track \(importIndex + 1) of \(n)", (Double(importIndex) + Double(pct) / 100) / Double(n + 1))
                     } else {
                         lastPct = 101
                         self.onStage("MP4Box: writing the final file", (Double(n) + Double(pct) / 100) / Double(n + 1))
+                        mux("MP4Box: writing the final file", (Double(n) + Double(pct) / 100) / Double(n + 1))
                     }
                 } else {
                     self.onLog(l + "\n")
-                    if l.contains("Interleaving") || l.hasPrefix("Saving") { self.onStage("MP4Box: interleaving", Double(n) / Double(n + 1)) }
+                    if l.contains("Interleaving") || l.hasPrefix("Saving") { self.onStage("MP4Box: interleaving", Double(n) / Double(n + 1)); mux("MP4Box: interleaving", Double(n) / Double(n + 1)) }
                 }
             }
         }
@@ -2333,11 +2560,12 @@ final class JobRunner {
         return p.terminationReason == .exit ? p.terminationStatus : -2
     }
 
-    /// Deletes old temporary folders (> 24 h) left by an interrupted run
+    /// Deletes old temporary folders (> 24 h) left by an interrupted run — never one whose `.lock` names a running process
     static func removeStaleTemps(in dir: URL) {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: []) else { return }
         for u in items where u.lastPathComponent.hasPrefix(".BROS-MUX-tmp-") {
+            if TempLock.liveOwner(of: u) != nil { continue }      // Beta 2.0.0: a job is still running in it
             if let d = try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
                Date().timeIntervalSince(d) > 24 * 3600 { try? fm.removeItem(at: u) }
         }

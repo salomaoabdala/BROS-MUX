@@ -428,8 +428,77 @@ enum DolbyVisionMeta {
             else if let v = after("L8 trims:") { s.trims = v }
             else if let v = after("L2 trims:"), s.trims.isEmpty { s.trims = v }
             else if let v = after("L9 MDP:") { s.mdp = v }
+            // Beta 2.0.0 (dovi_tool 2.3.4): "Profile: 8", "RPU content light level (L1): MaxCLL: 621.58 nits, MaxFALL: 18.42 nits",
+            // "L5 offsets: top=0, bottom=0, left=0, right=0" — read for the Video tab's analysis, nothing else uses them
+            else if let v = after("Profile:"), s.profile == nil { s.profile = v }
+            else if let v = after("RPU content light level (L1):") {
+                if let c = num("MaxCLL: ([\\d.]+)", in: v).first { s.l1MaxCLL = Int(c.rounded()) }
+                if let f = num("MaxFALL: ([\\d.]+)", in: v).first { s.l1MaxFALL = Int(f.rounded()) }
+            }
+            else if let v = after("L5 offsets:"), s.level5 == nil { s.level5 = v }
         }
         return s
+    }
+
+    /// The four Level 5 offsets of `Summary.level5` ("top=63, bottom=64, left=0, right=0"), nil when the text isn't that
+    static func level5Offsets(_ text: String?) -> (top: Int, bottom: Int, left: Int, right: Int)? {
+        guard let text else { return nil }
+        func v(_ k: String) -> Int? {
+            guard let r = text.range(of: k + #"\s*=\s*(-?\d+)"#, options: .regularExpression) else { return nil }
+            return Int(text[r].split(separator: "=").last?.trimmingCharacters(in: .whitespaces) ?? "")
+        }
+        guard let t = v("top"), let b = v("bottom"), let l = v("left"), let r = v("right") else { return nil }
+        return (t, b, l, r)
+    }
+
+    /// The track header of a Dolby Vision XML — what comes before the first <Shot>: the edit rate ("24 1") and the master's
+    /// primaries (<ColorEncoding><Primaries>, named by their coordinates). Only the head of the file is read (the 2DIE4 XML
+    /// is 127 MB; its header is the first 5 KB).
+    static func xmlHeader(_ xml: URL) -> (rate: Double?, primaries: String?) {
+        guard let fh = try? FileHandle(forReadingFrom: xml) else { return (nil, nil) }
+        defer { try? fh.close() }
+        var head = Data()
+        let marks = ["<Shot>", "<Shot ", ":Shot>", ":Shot "].map { Data($0.utf8) }
+        while head.count < 8 << 20 {
+            let d = fh.readData(ofLength: 256 << 10)
+            if d.isEmpty { break }
+            let from = max(0, head.count - 8)
+            head.append(d)
+            let tail = head.subdata(in: from..<head.count)
+            if marks.contains(where: { tail.range(of: $0) != nil }) { break }
+        }
+        let s = String(decoding: head, as: UTF8.self)
+        let h = String(s[..<(s.range(of: open("Shot"), options: .regularExpression)?.lowerBound ?? s.endIndex)])
+        func inner(_ name: String, in t: String) -> String? {
+            element(name, in: t).map { String(t[$0.inner]).trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        let rate = inner("EditRate", in: h).flatMap { Rational($0) }?.value
+        var primaries: String?
+        if let enc = inner("ColorEncoding", in: h), let p = inner("Primaries", in: enc) {
+            func xy(_ t: String?) -> (Double, Double)? {
+                let v = (t ?? "").split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" || $0 == "," }).compactMap { Double($0) }
+                return v.count == 2 ? (v[0], v[1]) : nil
+            }
+            if let r = xy(inner("Red", in: p)), let g = xy(inner("Green", in: p)), let b = xy(inner("Blue", in: p)) {
+                primaries = primariesName(red: r, green: g, blue: b, white: xy(inner("WhitePoint", in: enc)))
+            }
+        }
+        return (rate, primaries)
+    }
+
+    /// "P3-D65", "DCI-P3", "BT.2020", "BT.709" from CIE xy coordinates (±0.002), else the coordinates themselves
+    static func primariesName(red r: (Double, Double), green g: (Double, Double), blue b: (Double, Double), white w: (Double, Double)?) -> String {
+        let d65 = (0.3127, 0.3290), dci = (0.314, 0.351)
+        let known: [(String, (Double, Double), (Double, Double), (Double, Double), (Double, Double))] = [
+            ("P3-D65", (0.680, 0.320), (0.265, 0.690), (0.150, 0.060), d65),
+            ("DCI-P3", (0.680, 0.320), (0.265, 0.690), (0.150, 0.060), dci),
+            ("BT.2020", (0.708, 0.292), (0.170, 0.797), (0.131, 0.046), d65),
+            ("BT.709", (0.640, 0.330), (0.300, 0.600), (0.150, 0.060), d65),
+        ]
+        func near(_ a: (Double, Double), _ b: (Double, Double)) -> Bool { abs(a.0 - b.0) <= 0.002 && abs(a.1 - b.1) <= 0.002 }
+        for k in known where near(r, k.1) && near(g, k.2) && near(b, k.3) && (w.map { near($0, k.4) } ?? true) { return k.0 }
+        func f(_ p: (Double, Double)) -> String { String(format: "%.4g %.4g", p.0, p.1) }
+        return "custom (R \(f(r)), G \(f(g)), B \(f(b))" + (w.map { ", W \(f($0))" } ?? "") + ")"
     }
 }
 
@@ -476,6 +545,29 @@ enum HDR10Plus {
               let info = j["SceneInfo"] as? [Any] else { return nil }
         return info.count
     }
+
+    /// The display the HDR10+ metadata targets (the first SceneInfo's TargetedSystemDisplayMaximumLuminance, nits) and the
+    /// profile — read from the head of the JSON only (a feature film's JSON has one entry per frame), cached per file
+    static func info(_ json: URL) -> (targetNits: Int?, profile: String?) {
+        let mtime = (try? json.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        let key = json.path + "|\(mtime.timeIntervalSince1970)"
+        infoLock.lock(); let cached = infoCache[key]; infoLock.unlock()
+        if let cached { return cached }
+        guard let fh = try? FileHandle(forReadingFrom: json) else { return (nil, nil) }
+        defer { try? fh.close() }
+        let s = String(decoding: fh.readData(ofLength: 512 << 10), as: UTF8.self)
+        func first(_ pattern: String) -> String? {
+            guard let re = try? NSRegularExpression(pattern: pattern), let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+                  let r = Range(m.range(at: 1), in: s) else { return nil }
+            return String(s[r])
+        }
+        let r = (first(#""TargetedSystemDisplayMaximumLuminance"\s*:\s*([0-9.]+)"#).flatMap { Double($0) }.map { Int($0.rounded()) },
+                 first(#""HDR10plusProfile"\s*:\s*"([^"]*)""#))
+        infoLock.lock(); infoCache[key] = r; infoLock.unlock()
+        return r
+    }
+    private static let infoLock = NSLock()
+    private static var infoCache: [String: (targetNits: Int?, profile: String?)] = [:]
 }
 
 // MARK: - Settings (Mux tab)
@@ -691,8 +783,12 @@ final class HDRSettings {
             }
             let rpu = dir.appendingPathComponent("check.rpu")
             try DolbyVisionMeta.generateRPU(xml: x, width: width, height: height, to: rpu)
-            let summary = DolbyVisionMeta.summary(rpu)
+            var summary = DolbyVisionMeta.summary(rpu)
             try? FileManager.default.removeItem(at: rpu)
+            if summary != nil {       // Beta 2.0.0: the edit rate and the master's primaries, from the XML's own header
+                let h = DolbyVisionMeta.xmlHeader(x)
+                summary?.rate = h.rate; summary?.primaries = h.primaries
+            }
             if let s = summary, frames > 0, s.frames != frames {
                 return (summary, "The Dolby Vision metadata covers \(Fmt.int(s.frames)) frames but the picture has \(Fmt.int(frames)) — they must match frame for frame.", nil)
             }
@@ -768,14 +864,224 @@ struct MetadataCheck: Identifiable, Equatable {
     enum Fix: Equatable { case convertGamut, keepSourcePrimaries, useMeasuredLight, qualityFloorOff, removeMetadata, copyText(String) }
 }
 
-/// Wave 0: declared with the contract's signatures; the engine owner (E2) writes the real ones.
+/// The analysis behind the Video tab's Dolby Vision / HDR10+ pop-up: one line per rule of PLANO-BETA-2.0.0 Parte 1 §01
+/// item 3, each DETECTED (title) → RECOMMENDED (detail) → an optional one-click fix. Pure and quick (it reads what
+/// `HDRSettings.inspect` already measured — no process is started), so the Video tab can call it on the main thread;
+/// only `measureLetterbox` runs ffmpeg and belongs on a background queue. A ✕ (.fail) line blocks the Delivery.
 enum MetadataAnalysis {
     struct Letterbox: Equatable, Codable { var width: Int; var height: Int; var top: Int; var bottom: Int; var left: Int; var right: Int }
+
+    static let waiting = "Waiting for the picture…"
+
     /// cropdetect on a few frames spread over the film (background queue; a few seconds)
-    static func measureLetterbox(video: URL, index: Int, duration: Double, cancel: CancelFlag) -> Letterbox? { nil }
+    /// 6 points × 24 frames between 12 % and 88 % of the film (heads and tails are logos and credits), each point read
+    /// with ffmpeg's cropdetect (limit 24/255 of the code range, scaled to the bit depth; even values); a point that is
+    /// almost all black (a dark shot or a fade) is dropped, and the crop most points agree on wins (a tie: the larger one).
+    /// nil when nothing could be measured. The source is only read.
+    static func measureLetterbox(video: URL, index: Int, duration: Double, cancel: CancelFlag) -> Letterbox? {
+        guard let ffmpeg = Tools.ffmpeg, duration > 0,
+              let s = Probe.raw(video)?.streams?.first(where: { $0.index == index }),
+              let W = s.width, let H = s.height, W > 0, H > 0 else { return nil }
+        let fps = Rational((s.avg_frame_rate ?? s.r_frame_rate ?? "24").replacingOccurrences(of: "/", with: " "))?.value ?? 24
+        let window = 24 / max(fps, 1)
+        let points = 6
+        var crops: [Letterbox] = []
+        for k in 0..<points {
+            if cancel.isSet { return nil }
+            let t = max(0, min(duration - window - 0.1, duration * (0.12 + 0.76 * Double(k) / Double(points - 1))))
+            let args = ["-nostdin", "-hide_banner", "-v", "info", "-ss", String(format: "%.3f", t), "-i", video.path,
+                        "-map", "0:\(index)", "-frames:v", "24", "-an", "-sn", "-dn",
+                        "-vf", "cropdetect=limit=0.094:round=2:reset=0", "-f", "null", "-"]
+            guard let d = Tools.runCancellable(ffmpeg, args, cancel: cancel, stderr: true) else { continue }
+            let text = String(decoding: d, as: UTF8.self)
+            // the last line holds the area seen over all 24 frames (reset=0): crop=W:H:X:Y
+            guard let r = text.range(of: #"crop=(-?\d+):(-?\d+):(-?\d+):(-?\d+)"#, options: [.regularExpression, .backwards]) else { continue }
+            let v = text[r].dropFirst(5).split(separator: ":").compactMap { Int($0) }
+            guard v.count == 4 else { continue }
+            let (w, h, x, y) = (v[0], v[1], v[2], v[3])
+            guard w >= W * 2 / 5, h >= H * 2 / 5, x >= 0, y >= 0, x + w <= W, y + h <= H else { continue }   // a black point says nothing
+            crops.append(Letterbox(width: w, height: h, top: y, bottom: H - y - h, left: x, right: W - x - w))
+        }
+        guard !crops.isEmpty else { return nil }
+        var count: [String: (Letterbox, Int)] = [:]
+        for c in crops { let k = "\(c.width)x\(c.height)+\(c.left)+\(c.top)"; count[k] = (c, (count[k]?.1 ?? 0) + 1) }
+        return count.values.max { a, b in a.1 != b.1 ? a.1 < b.1 : a.0.width * a.0.height < b.0.width * b.0.height }?.0
+    }
+
+    static func fpsText(_ v: Double) -> String {
+        abs(v - v.rounded()) < 0.001 ? String(format: "%.0f", v) : String(format: "%.3f", v)
+    }
+    private static func line(_ level: CheckLevel, _ title: String, _ detail: String, _ fix: MetadataCheck.Fix? = nil) -> MetadataCheck {
+        MetadataCheck(level: level, title: title, detail: detail, fix: fix)
+    }
+    /// The picture's colour as the master is described: "P3-D65 / PQ"
+    private static func masterText(_ c: SourceColor) -> String {
+        let p: String
+        switch c.primaries {
+        case "smpte432": p = "P3-D65"
+        case "smpte431": p = "DCI-P3"
+        case "bt2020": p = "BT.2020"
+        case "bt709": p = "BT.709"
+        case nil: p = "untagged primaries"
+        case .some(let x): p = SourceColor.name(x)
+        }
+        return p + " / " + (c.transfer == nil ? "untagged transfer" : SourceColor.name(c.transfer))
+    }
+
     /// waitingForPicture == true → lines that need the picture say "Waiting for the picture…" (level .info, never ✓)
-    static func dolbyVision(_ hdr: HDRSettings, picture: SourceVideo?, frames: Int, fps: Double, letterbox: Letterbox?) -> [MetadataCheck] { [] }
-    static func hdr10Plus(_ hdr: HDRSettings, picture: SourceVideo?, frames: Int, fps: Double) -> [MetadataCheck] { [] }
+    static func dolbyVision(_ hdr: HDRSettings, picture: SourceVideo?, frames: Int, fps: Double, letterbox: Letterbox?) -> [MetadataCheck] {
+        guard let src = hdr.dvSource else { return [line(.info, "No Dolby Vision metadata", "Add the Dolby Vision XML on the Video tab.")] }
+        if hdr.dvChecking { return [line(.info, "Reading \(src.label)…", "dovi_tool is reading the Dolby Vision metadata.")] }
+        // 1. the XML can be read
+        guard let s = hdr.dvSummary else {
+            let why = hdr.dvProblem ?? "dovi_tool couldn't read the Dolby Vision metadata."
+            return [line(.fail, "XML can't be read: \(src.label)", "\(why) — this can't be fixed here: send the error to the colourist.", .copyText(why))]
+        }
+        var out: [MetadataCheck] = []
+        out.append(line(.ok, "XML readable: \(src.label)", "dovi_tool read \(Fmt.int(s.frames)) frames" + (s.shots > 0 ? " in \(Fmt.int(s.shots)) shots" : "") + "."))
+        let waitingForPicture = picture == nil || frames <= 0
+        let fpsShown = fpsText(fps > 0 ? fps : (s.rate ?? 24))
+        let ask = "Please send a Dolby Vision XML of \(Fmt.int(frames)) frames at \(fpsShown) fps"
+        // 2. frames
+        if waitingForPicture {
+            out.append(line(.info, "Frames: \(Fmt.int(s.frames)) in the XML", waiting))
+        } else if s.frames == frames {
+            out.append(line(.ok, "Frames: \(Fmt.int(s.frames)) = the picture", "Frame for frame with the picture."))
+        } else {
+            out.append(line(.fail, "Frames: \(Fmt.int(s.frames)) in the XML, \(Fmt.int(frames)) in the picture",
+                            "They must match frame for frame — ask the colourist for an XML of \(Fmt.int(frames)) frames at \(fpsShown) fps.", .copyText(ask)))
+        }
+        // 3. frame rate
+        if let r = s.rate {
+            if waitingForPicture { out.append(line(.info, "Frame rate: \(fpsText(r)) fps in the XML", waiting)) }
+            else if fps <= 0 || abs(r - fps) < 0.01 { out.append(line(.ok, "Frame rate: \(fpsText(r)) fps = the picture", "The XML's edit rate is the picture's.")) }
+            else {
+                out.append(line(.fail, "Frame rate: \(fpsText(r)) fps in the XML, \(fpsShown) fps in the picture",
+                                "The metadata was made for another frame rate — ask the colourist for an XML of \(Fmt.int(frames)) frames at \(fpsShown) fps.", .copyText(ask)))
+            }
+        } else {
+            out.append(line(.info, "Frame rate: not stated in the XML", "The XML has no <EditRate>; the frames are compared one by one instead."))
+        }
+        // 4. Level 5 (active area) against the letterbox measured in the picture
+        let l5 = DolbyVisionMeta.level5Offsets(s.level5)
+        let l5Text = l5.map { "top \($0.top) · bottom \($0.bottom) · left \($0.left) · right \($0.right)" } ?? "none (full frame)"
+        if waitingForPicture {
+            out.append(line(.info, "Level 5 (active area): \(l5Text)", waiting))
+        } else if let lb = letterbox {
+            let o = l5 ?? (0, 0, 0, 0)
+            let tol = 4      // cropdetect finds even edges; dovi_tool rounds the XML's aspect ratio (2DIE4: 63/64 vs 64/64)
+            let same = abs(o.top - lb.top) <= tol && abs(o.bottom - lb.bottom) <= tol && abs(o.left - lb.left) <= tol && abs(o.right - lb.right) <= tol
+            let measured = "\(lb.width)×\(lb.height) (top \(lb.top) · bottom \(lb.bottom) · left \(lb.left) · right \(lb.right))"
+            if same {
+                out.append(line(.ok, "Level 5 (active area): \(l5Text)", "Matches the picture's letterbox, measured \(measured)."))
+            } else {
+                out.append(line(.warn, "Level 5 (active area): \(l5Text) in the XML, \(measured) in the picture",
+                                "Level 5 tells the TV where the picture is inside the frame. Ask the colourist to check the aspect ratio (Level 5) of the export."))
+            }
+        } else {
+            out.append(line(.info, "Level 5 (active area): \(l5Text)", "The picture's letterbox isn't measured yet."))
+        }
+        // 5. profile and CM version (information: the file is always written as 8.1)
+        out.append(line(.info, "Profile \(s.profile ?? "?")" + (s.cm.isEmpty ? "" : " · \(s.cm)"), "Written as Dolby Vision 8.1 (HDR10-compatible)."))
+        // 6. L6 MaxCLL / MaxFALL (what the HDR10 layer will say)
+        let l1 = (s.l1MaxCLL ?? 0) > 0 && (s.l1MaxFALL ?? 0) > 0 ? (s.l1MaxCLL!, s.l1MaxFALL!) : nil
+        let l1Text = l1.map { "MaxCLL \($0.0) · MaxFALL \($0.1) nits" }
+        if let c = s.maxCLL, let f = s.maxFALL, c > 0, f > 0 {
+            out.append(line(.ok, "L6 MaxCLL \(c) · MaxFALL \(f) nits", c == hdr.maxCLL && f == hdr.maxFALL ? "Written into the HDR10 layer."
+                            : "HDR10 gets MaxCLL \(hdr.maxCLL) · MaxFALL \(hdr.maxFALL) nits — the values set on the Video tab."))
+        } else {
+            let l6 = s.maxCLL == nil && s.maxFALL == nil ? "no L6 light levels" : "L6 MaxCLL \(s.maxCLL ?? 0) · MaxFALL \(s.maxFALL ?? 0)"
+            if hdr.maxCLL > 0 && hdr.maxFALL > 0 {
+                let src = l1.map { $0.0 == hdr.maxCLL && $0.1 == hdr.maxFALL } == true ? "the values measured from L1" : "the values set on the Video tab"
+                out.append(line(.ok, "\(l6) in the XML", "HDR10 gets MaxCLL \(hdr.maxCLL) · MaxFALL \(hdr.maxFALL) nits — \(src)."))
+            } else if let l1Text {
+                out.append(line(.warn, "\(l6) in the XML", "The HDR10 layer would say the film has no light level. Use the values measured from L1: \(l1Text).", .useMeasuredLight))
+            } else {
+                out.append(line(.warn, "\(l6) in the XML", "The HDR10 layer would say the film has no light level, and the XML has no L1 measurement to take them from — ask the colourist."))
+            }
+        }
+        // 7. the master's primaries → BT.2020 (the picture's tags decide what the encode does; the XML is the cross-check)
+        if waitingForPicture {
+            out.append(line(.info, "Master: \(s.primaries ?? "primaries not stated") (from the XML)", waiting))
+        } else if let c = picture?.color {
+            let master = masterText(c)
+            let xmlSays = s.primaries.map { " · the XML says \($0)" } ?? ""
+            if c.isHLG {
+                out.append(line(.warn, "Master: \(master)\(xmlSays)", "HLG can't be converted in this app — Dolby Vision 8.1 here is PQ."))
+            } else if c.transfer != nil && !c.isPQ {
+                out.append(line(.fail, "Master: \(master)\(xmlSays)", "The picture is tagged SDR: HDR10 and Dolby Vision metadata can't describe it. Check the source."))
+            } else if c.primaries == "bt2020" {
+                out.append(line(.ok, "Master: \(master)\(xmlSays)", "Already BT.2020: written as it is."))
+            } else if let p = c.primaries, ColorLUT.primaries(p) != nil {
+                if hdr.convertGamut {
+                    out.append(line(.ok, "Master: \(master)\(xmlSays)", "Will be converted to BT.2020 in the new file (recommended) — your master isn't changed", .keepSourcePrimaries))
+                } else {
+                    out.append(line(.warn, "Master: \(master)\(xmlSays)", "Stays tagged \(ColorLUT.label(p)): HDR10 and Dolby Vision streams are BT.2020, so players that assume BT.2020 will shift the hues. Convert to BT.2020 (recommended) — your master isn't changed.", .convertGamut))
+                }
+            } else if c.primaries == nil {
+                out.append(line(.warn, "Master: \(master)\(xmlSays)", "The picture carries no primaries tag, so nothing can be converted: the new file is tagged BT.2020 as it is. Check the source's colour tags."))
+            } else {
+                out.append(line(.warn, "Master: \(master)\(xmlSays)", "\(SourceColor.name(c.primaries)) can't be converted in this app — only P3-D65 and BT.709 masters go to BT.2020."))
+            }
+        }
+        // 8. the quality floor against the HEVC Level 5.1 cap
+        let rate = hdr.rate
+        if hdr.rateMode != .quality && hdr.qualityFloor {
+            out.append(line(.warn, "Quality floor: on (QP \(HDRSettings.Rate.floorQP)) · \(hdr.rateMode.label)",
+                            "The quality floor (QP \(HDRSettings.Rate.floorQP)) can push the peak past the \(HDRSettings.Rate.level51Mbps) Mbps cap (measured 274–305 Mbps on the 2DIE4's heaviest scene) — players built for HEVC Level 5.1 may refuse it",
+                            .qualityFloorOff))
+        } else if rate.beyondLevel51 {
+            out.append(line(.warn, "Peak bitrate: \(rate.maxMbps) Mbps · \(hdr.rateMode.label)",
+                            "Beyond the \(HDRSettings.Rate.level51Mbps) Mbps of HEVC Level 5.1 — fine on the Zidoo; players built for HEVC Level 5.1 may refuse it."))
+        } else {
+            let peak = hdr.rateMode == .quality ? hdr.quality.maxMbps : rate.maxMbps
+            out.append(line(.ok, "Peak bitrate: up to \(peak) Mbps · \(hdr.rateMode.label)", "Within HEVC Level 5.1 (\(HDRSettings.Rate.level51Mbps) Mbps), what UHD players are built for."))
+        }
+        return out
+    }
+
+    static func hdr10Plus(_ hdr: HDRSettings, picture: SourceVideo?, frames: Int, fps: Double) -> [MetadataCheck] {
+        guard let json = hdr.hdr10plusJSON else { return [line(.info, "No HDR10+ metadata", "Add the HDR10+ JSON on the Video tab.")] }
+        let name = json.lastPathComponent
+        // 1. readable (a SceneInfo list)
+        guard let n = hdr.hdr10plusFrames else { return [line(.info, "Reading \(name)…", "Counting the HDR10+ frames.")] }
+        guard n >= 0 else {
+            return [line(.fail, "JSON can't be read: \(name)", "It isn't HDR10+ metadata (no SceneInfo list) — this can't be fixed here.", .removeMetadata)]
+        }
+        var out = [line(.ok, "JSON readable: \(name)", "\(Fmt.int(n)) frames of HDR10+ (SceneInfo).")]
+        let waitingForPicture = picture == nil || frames <= 0
+        // 2. frames
+        if waitingForPicture { out.append(line(.info, "Frames: \(Fmt.int(n)) in the JSON", waiting)) }
+        else if n == frames { out.append(line(.ok, "Frames: \(Fmt.int(n)) = the picture", "Frame for frame with the picture.")) }
+        else {
+            let f = fpsText(fps > 0 ? fps : 24)
+            out.append(line(.fail, "Frames: \(Fmt.int(n)) in the JSON, \(Fmt.int(frames)) in the picture",
+                            "They must match frame for frame — ask the colourist for an HDR10+ JSON of \(Fmt.int(frames)) frames at \(f) fps.",
+                            .copyText("Please send an HDR10+ JSON of \(Fmt.int(frames)) frames at \(f) fps")))
+        }
+        // 3. the reference display (information)
+        let info = HDR10Plus.info(json)
+        if let t = info.targetNits {
+            out.append(line(.info, "Reference display: \(t) nits", "The display the HDR10+ metadata was made for" + (info.profile.map { " · profile \($0)" } ?? "") + "."))
+        } else {
+            out.append(line(.info, "Reference display: not stated", "The JSON has no TargetedSystemDisplayMaximumLuminance."))
+        }
+        // 4. coherence with the HDR10 (static) mastering written next to it
+        let m = hdr.mastering
+        if !waitingForPicture, let c = picture?.color, c.transfer != nil, !c.isPQ {
+            out.append(line(.fail, "Picture: \(masterText(c))", "HDR10+ describes a PQ picture; this one is tagged \(SourceColor.name(c.transfer)). Check the source."))
+        } else if let t = info.targetNits, Double(t) > m.maxNits + 0.5 {
+            out.append(line(.warn, "HDR10 mastering: \(m.text) · HDR10+ targets \(t) nits",
+                            "The HDR10+ reference display is brighter than the HDR10 mastering display — one of them is wrong. Check the mastering peak on the Video tab."))
+        } else if hdr.maxCLL > 0, Double(hdr.maxCLL) > m.maxNits * 1.1 {
+            out.append(line(.warn, "HDR10 mastering: \(m.text) · MaxCLL \(hdr.maxCLL)",
+                            "MaxCLL is above the mastering display's peak — check the HDR10 values on the Video tab."))
+        } else {
+            out.append(line(.ok, "HDR10 mastering: \(m.text)" + (hdr.maxCLL > 0 ? " · MaxCLL \(hdr.maxCLL) · MaxFALL \(hdr.maxFALL)" : ""),
+                            "Consistent with the HDR10+ metadata."))
+        }
+        return out
+    }
 }
 
 // MARK: - Interface: see HDRViews.swift
