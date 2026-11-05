@@ -26,7 +26,9 @@ enum ZidooLevel {
     case plays, likely, noPlay
     var emoji: String { switch self { case .plays: return "🟢"; case .likely: return "🟡"; case .noPlay: return "🔴" } }
     var title: String { switch self { case .plays: return "PLAYS ON THE ZIDOO"; case .likely: return "SHOULD PLAY ON THE ZIDOO"; case .noPlay: return "NOT SUPPORTED ON THE ZIDOO" } }
-    var color: Color { switch self { case .plays: return .green; case .likely: return Color(red: 0.86, green: 0.62, blue: 0.0); case .noPlay: return .red } }
+    var color: Color { switch self { case .plays: return Cryo.pass; case .likely: return Cryo.attention; case .noPlay: return Cryo.fail } }
+    /// The status glyph next to the seal's words (colour never carries the verdict alone)
+    var icon: String { switch self { case .plays: return "checkmark.circle.fill"; case .likely: return "exclamationmark.triangle.fill"; case .noPlay: return "xmark.octagon.fill" } }
     var explanation: String {
         switch self {
         case .plays: return "Container, video and audio are all confirmed for the Z9X PRO (Zidoo's specs or your own use)."
@@ -148,35 +150,47 @@ enum Zidoo {
     }
 }
 
-/// The Zidoo seal, drawn like the Academy seal so the two sit side by side
+
+// MARK: - Look (Cryo): the Zidoo seal and the list of checks
+
+/// The Zidoo seal, drawn like the Academy seal so the two sit side by side: an engraved plate that lights up in the
+/// verdict's colour, with the verdict's icon and words next to it (the colour never says it alone)
 struct ZidooSeal: View {
     let level: ZidooLevel?
     let caption: String
     var compact = false
 
     var body: some View {
-        let color = level?.color ?? Color.secondary
+        let color = level?.color ?? Cryo.ink3
+        let lit = level != nil
         let d: CGFloat = compact ? 48 : 64
-        HStack(spacing: 12) {
+        HStack(spacing: compact ? 12 : 14) {
             ZStack {
-                Circle().fill(color.opacity(0.12))
-                Circle().strokeBorder(color, lineWidth: 2)
-                Image(systemName: "play.rectangle.fill").font(.system(size: d * 0.36)).foregroundStyle(color)
+                Circle().fill(RadialGradient(colors: [color.opacity(lit ? 0.24 : 0.05), color.opacity(lit ? 0.07 : 0.02), Color.black.opacity(0.35)],
+                                             center: UnitPoint(x: 0.45, y: 0.3), startRadius: 0, endRadius: d * 0.62))
+                Circle().strokeBorder(color.opacity(lit ? 0.8 : 0.3), lineWidth: 1.5)
+                Circle().inset(by: d * 0.09).strokeBorder(color.opacity(lit ? 0.32 : 0.12), lineWidth: 1)
+                Image(systemName: "play.rectangle.fill").font(.system(size: d * 0.32, weight: .semibold)).foregroundStyle(color)
             }
             .frame(width: d, height: d)
             .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(level?.title ?? "Zidoo: —")
-                    .font(compact ? .headline : .title3.weight(.semibold)).foregroundStyle(color)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if let level { Image(systemName: level.icon).font(.system(size: compact ? 12 : 14, weight: .semibold)) }
+                    Text(level?.title ?? "ZIDOO: —").font(CryoFont.title(compact ? 13 : 15)).tracking(0.6)
+                }
+                .foregroundStyle(color)
                 Text(level?.explanation ?? "Add a video and audio to evaluate.")
-                    .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text(caption).font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                    .font(CryoFont.body(compact ? 11.5 : 12.5)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
+                Text(caption).font(CryoFont.body(11)).foregroundStyle(Cryo.ink3).fixedSize(horizontal: false, vertical: true)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// A list of checks with the same look as the Academy list in the File Checker
+/// A list of checks, each one an icon + word + title + detail line, in a recessed slot. The same rows draw the Academy
+/// list of the File Checker (ChecksSection.Row).
 struct ChecksSection: View {
     let title: String
     let checks: [Check]
@@ -185,23 +199,120 @@ struct ChecksSection: View {
     var body: some View {
         let fails = checks.filter { $0.level == .fail }.count
         let warns = checks.filter { $0.level == .warn }.count
-        Section {
-            ForEach(checks) { c in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: c.level.icon).foregroundStyle(c.level.color).frame(width: 16)
-                    Text(c.title).fontWeight(.medium).frame(width: 230, alignment: .leading)
-                    Text(c.detail).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        let level: CheckLevel = fails > 0 ? .fail : warns > 0 ? .warn : .ok
+        let summary = fails > 0 ? "\(fails) blocking\(warns > 0 ? " · \(warns) not confirmed" : "")" : warns > 0 ? "\(warns) not confirmed" : "Everything in the specs"
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                CryoSectionHeader(title)
+                Self.Summary(level: level, text: summary)
+            }
+            CryoSlot {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(checks.enumerated()), id: \.element.id) { i, c in
+                        if i > 0 { Self.Hairline() }
+                        Self.Row(check: c).padding(.vertical, 6)
+                    }
+                    if checks.isEmpty { Text("Nothing to check.").font(CryoFont.body(12)).foregroundStyle(Cryo.ink3).padding(.vertical, 6) }
                 }
             }
-        } header: {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(fails > 0 ? "\(fails) blocking\(warns > 0 ? " · \(warns) not confirmed" : "")" : warns > 0 ? "\(warns) not confirmed" : "Everything in the specs")
-                    .foregroundStyle(fails > 0 ? Color.red : warns > 0 ? Color.orange : Color.green)
+            if let footer { Text(footer).font(CryoFont.body(11)).foregroundStyle(Cryo.ink3).fixedSize(horizontal: false, vertical: true) }
+        }
+    }
+}
+
+extension ChecksSection {
+    /// The status colours of the checking tools: mint PASS, amber WARN, #FF6B6B FAIL, grey INFO
+    static func color(_ level: CheckLevel) -> Color {
+        switch level {
+        case .ok: return Cryo.pass
+        case .warn: return Cryo.attention
+        case .fail: return Cryo.fail
+        case .info: return Cryo.info
+        }
+    }
+
+    /// Icon + word in the status colour (PASS / WARN / FAIL / INFO, or another word)
+    struct Status: View {
+        let level: CheckLevel
+        var word: String? = nil
+        var body: some View {
+            HStack(spacing: 4) {
+                Image(systemName: level.icon).font(.system(size: 11, weight: .semibold))
+                Text(word ?? level.text).font(CryoFont.label(10)).tracking(0.8)
             }
-        } footer: {
-            if let footer { Text(footer) }
+            .foregroundStyle(ChecksSection.color(level))
+            .fixedSize()
+        }
+    }
+
+    /// The count line next to a list's title: icon + words + colour
+    struct Summary: View {
+        let level: CheckLevel
+        let text: String
+        var body: some View {
+            HStack(spacing: 5) {
+                Image(systemName: level.icon).font(.system(size: 11, weight: .semibold))
+                Text(text).font(CryoFont.body(12).weight(.medium))
+            }
+            .foregroundStyle(ChecksSection.color(level))
+            .fixedSize()
+        }
+    }
+
+    /// One check: status, title and detail in three columns, stacked under the status when the space is narrow
+    struct Row: View {
+        let check: Check
+        var body: some View {
+            RowLayout {
+                Status(level: check.level)
+                Text(check.title).font(CryoFont.body(12.5).weight(.medium)).foregroundStyle(Cryo.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(check.detail).font(CryoFont.body(12.5)).foregroundStyle(Cryo.ink2).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    struct Hairline: View {
+        var body: some View { Rectangle().fill(Cryo.s3.opacity(0.7)).frame(height: 1) }
+    }
+
+    /// status | title | detail on a wide page; status | title over detail on a narrow one (an inspector, a sheet)
+    struct RowLayout: Layout {
+        var statusWidth: CGFloat = 64
+        var titleWidth: CGFloat = 220
+        var spacing: CGFloat = 10
+        var breakpoint: CGFloat = 600
+
+        private func widths(_ w: CGFloat) -> (wide: Bool, title: CGFloat, detail: CGFloat) {
+            if w >= breakpoint { return (true, titleWidth, max(60, w - statusWidth - titleWidth - 2 * spacing)) }
+            let rest = max(60, w - statusWidth - spacing)
+            return (false, rest, rest)
+        }
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            guard subviews.count == 3 else { return .zero }
+            let w = proposal.width ?? 720
+            let c = widths(w)
+            let hs = subviews[0].sizeThatFits(ProposedViewSize(width: statusWidth, height: nil)).height
+            let ht = subviews[1].sizeThatFits(ProposedViewSize(width: c.title, height: nil)).height
+            let hd = subviews[2].sizeThatFits(ProposedViewSize(width: c.detail, height: nil)).height
+            return CGSize(width: w, height: c.wide ? max(hs, ht, hd) : max(hs, ht + 2 + hd))
+        }
+
+        func placeSubviews(in b: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            guard subviews.count == 3 else { return }
+            let c = widths(b.width)
+            let x1 = b.minX + statusWidth + spacing
+            subviews[0].place(at: CGPoint(x: b.minX, y: b.minY + 1), proposal: ProposedViewSize(width: statusWidth, height: nil))
+            subviews[1].place(at: CGPoint(x: x1, y: b.minY), proposal: ProposedViewSize(width: c.title, height: nil))
+            if c.wide {
+                subviews[2].place(at: CGPoint(x: x1 + titleWidth + spacing, y: b.minY), proposal: ProposedViewSize(width: c.detail, height: nil))
+            } else {
+                let ht = subviews[1].sizeThatFits(ProposedViewSize(width: c.title, height: nil)).height
+                subviews[2].place(at: CGPoint(x: x1, y: b.minY + ht + 2), proposal: ProposedViewSize(width: c.detail, height: nil))
+            }
         }
     }
 }
