@@ -56,9 +56,14 @@ Regra do dono (2026-11-04). O BROS-MUX vai ser operado por gente sem o Claude e 
 
 ## Regras do app
 
-- **Aba Mux:** nada é recomprimido; as faixas só são juntadas. A única exceção é a recodificação automática para Dolby Vision/HDR10+, e ela tem que ser sempre anunciada com clareza, dizendo o que a ligou e mostrando fonte → destino.
-- **Aba Transcode** (planejada em `PLANO-TRANSCODE.md`, implementada na v1.6): é o único lugar onde codec, qualidade, tamanho, resolução e cor podem mudar.
-- Não espalhar funções entre abas. Cada aba faz uma coisa só e diz isso no topo.
-- O app nunca altera a mixagem nem os arquivos de origem.
+Na Beta 2.0.0 (branch `beta-2.0.0`), estas regras substituem as antigas ("Aba Mux" e "Aba Transcode"), a pedido do dono em 2026-11-05. Detalhes em `PLANO-BETA-2.0.0.md`.
+
+- **O caminho em passos:** 01 Video → 02 Audio → 03 Subtitles → 04 Delivery. Depois de um divisor visual vêm as ferramentas de checagem (File Checker, Render QC, Atmos Visualizer), que só leem arquivos. Cada aba faz uma coisa só e diz isso no topo.
+- **Toda aba diz sempre se mexe no arquivo**, com uma palavra só para cada coisa: COPY · bit-exact (os bits não mudam), MUX (juntar faixas copiadas), TRANSCODE (recomprimir; os bits mudam) e READ ONLY (ferramentas).
+- **Video e Audio copiam bit a bit por padrão.** Transcodar é sempre uma escolha explícita do dono, anunciada em âmbar, com fonte → destino e o motivo (por exemplo: "ProRes 4444 can't carry the Dolby Vision metadata").
+- **O app nunca decide em silêncio.** Uma decisão sem resposta fica pendente e impede o Start, com o motivo à vista: o som que veio no vídeo sem resposta, metadado Dolby Vision ou HDR10+ sem decisão, um ✕ na análise.
+- **Áudio transcodado** (AAC ou PCM 24-bit) muda o codec, nunca o nível, os canais, a ordem ou o sync, e isso é verificado depois de escrever. Dolby (Atmos, E-AC-3, TrueHD) só sai em cópia.
+- **O app nunca altera a mixagem nem os arquivos de origem.**
+- **O motor não muda de comportamento por causa da interface.** A saída de `--job`, `--transcode`, `--qc` e `--picture` e o comando x265 do encode Dolby Vision (`qc/reference/dv-command.txt`) continuam idênticos.
 - A interface fica em inglês; a documentação (README, CHANGELOG, planos), em português.
 - **Unidades:** bitrate (o que define o tamanho do arquivo final) em **Mbps** e **Kbps**; velocidade de leitura, gravação e transferência em **MB/s** e **KB/s**. Nunca "Mb/s", "kb/s" nem "MiB".
