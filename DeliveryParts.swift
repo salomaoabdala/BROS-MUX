@@ -1,286 +1,416 @@
-// BROS-MUX Beta 2.0.0 — pieces of the Delivery: output, Academy/Zidoo prediction, summary, result banner and log.
-// Moved unchanged from MuxUI.swift (the Delivery owner restyles and rebinds them).
+// BROS-MUX Beta 2.0.0 — pieces of the Delivery, in Cryo: where the file goes (OutputSection), the checks after writing
+// with the predicted Academy / Zidoo seals (AcademySection), the stream plan (SummarySections), the result
+// (ResultBanner, fed by a DeliveryItem) and the log (LogSheet). Status colours mean status only: PASS mint + icon +
+// word, ATTENTION amber, FAIL red; cyan is identity and light, never "OK".
 
 import SwiftUI
 import AppKit
 
-// MARK: - Result
+// MARK: - Small pieces
 
-struct ResultBanner: View {
-    @Environment(Project.self) private var project
-    @State private var showLog = false
-    @State private var pictureModel: PictureSyncModel?
+/// The colour of a status (with its icon and word, never alone)
+func deliveryColor(_ l: CheckLevel) -> Color {
+    switch l {
+    case .ok: return Cryo.pass
+    case .warn: return Cryo.attention
+    case .fail: return Cryo.fail
+    case .info: return Cryo.info
+    }
+}
 
+/// The status of an engine line, read from its ✓ / ⚠ / ✗ (the line itself is never rewritten here)
+func deliveryLevel(of line: String) -> CheckLevel {
+    if line.contains("✗") || line.contains("✕") || line.contains("FAILED") || line.hasPrefix("   ERROR") { return .fail }
+    if line.contains("⚠") || line.hasPrefix("   warning") { return .warn }
+    if line.contains("✓") { return .ok }
+    return .info
+}
+
+/// One line with its status icon (✓ / ⚠ / ✕ lines of the engine, preflight lines)
+struct DeliveryLineRow: View {
+    let level: CheckLevel
+    let text: String
+    var mono = false
     var body: some View {
-        switch project.state {
-        case .done(let url):
-            let s = project.resultState
-            banner(color: s == .ok ? .green : s == .warning ? .orange : .red,
-                   icon: s == .ok ? "checkmark.circle.fill" : s == .warning ? "exclamationmark.triangle.fill" : "xmark.octagon.fill",
-                   title: s == .ok ? "Done — \(url?.lastPathComponent ?? "")" : s == .warning ? "File created, with warnings" : "File created, but a check failed") {
-                if let insp = project.resultInspection {
-                    if !project.hdr.encode, project.container != .mkv {
-                        AcademySeal(level: insp.level, caption: "Verified on the final file", compact: true).padding(.top, 6)
-                    }
-                    ZidooSeal(level: insp.zidooLevel, caption: "Read from the final file · " + Zidoo.caveat, compact: true).padding(.top, 6)
-                }
-                HStack(spacing: 8) {
-                    if let url {
-                        Button("Inspect Final File") { project.inspector.load(url); project.mode = .inspect }
-                        if project.included.contains(where: \.isAtmos) {
-                            Button("Visualize Atmos") { project.atmos.load(url); project.mode = .atmos }
-                        }
-                        Button("Picture Sync Check…") { pictureModel = PictureSyncModel(project: project, output: url) }
-                            .help("Frames around a hard cut, the waveform under them and a looping preview of the muxed file")
-                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                    }
-                    Button("Log") { showLog = true }
-                }
-                .padding(.top, 6)
-            } detail: {
-                ForEach(Array(project.resultLines.enumerated()), id: \.offset) { _, l in
-                    Text("• " + l).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .sheet(isPresented: $showLog) { LogSheet() }
-            .sheet(item: $pictureModel) { PictureSyncSheet(model: $0) }
-        case .failed:
-            banner(color: .red, icon: "xmark.octagon.fill", title: "That didn't work") {
-                Button("Show Full Log") { showLog = true }.padding(.top, 6)
-            } detail: {
-                ForEach(Array(project.resultLines.enumerated()), id: \.offset) { _, l in
-                    Text(l).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .sheet(isPresented: $showLog) { LogSheet() }
-        case .cancelled:
-            banner(color: .secondary, icon: "stop.circle.fill", title: "Cancelled — nothing was written to the destination.") { EmptyView() } detail: { EmptyView() }
-        default:
-            EmptyView()
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: level.icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(deliveryColor(level))
+                .frame(width: 14)
+                .accessibilityLabel(level.text)
+            Text(text).font(mono ? CryoFont.mono(11) : CryoFont.body(12)).foregroundStyle(level == .info ? Cryo.ink2 : Cryo.ink)
+                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
     }
+}
 
-    func banner<A: View, D: View>(color: Color, icon: String, title: String,
-                                  @ViewBuilder actions: () -> A, @ViewBuilder detail: () -> D) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon).font(.title2).foregroundStyle(color).symbolRenderingMode(.hierarchical)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.headline)
-                detail()
-                actions()
+/// A transcode said out loud: opaque, amber, high contrast — source → destination and why
+struct DeliveryAmberBox: View {
+    let title: String
+    let text: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 13, weight: .semibold)).foregroundStyle(Cryo.attention)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(CryoFont.label(11)).tracking(0.8).foregroundStyle(Cryo.attention)
+                Text(text).font(CryoFont.body(12)).foregroundStyle(Cryo.ink).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).fill(color.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: DS.radius, style: .continuous).strokeBorder(color.opacity(0.22), lineWidth: 1))
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color(.sRGB, red: 0.16, green: 0.115, blue: 0.055, opacity: 1)))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Cryo.attention.opacity(0.7), lineWidth: 1))
     }
 }
 
-/// Output: container, destination, quality options, progress and the command behind it all
-struct OutputSection: View {
-    @Environment(Project.self) private var project
-    @State private var showCommand = false
-    @State private var showQuality = false
-
+/// A caps label and a value, side by side (numbers in mono)
+struct DeliveryReadout: View {
+    let label: String
+    let value: String
+    var detail: String? = nil
+    var big = false
     var body: some View {
-        @Bindable var project = project
-        Section {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Format")
-                Picker("Format", selection: $project.container) {
-                    ForEach(Container.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-                .disabled(project.busy)
-            }
-            // Render-style destination: folder, file name, and whether it fits
-            VStack(alignment: .leading, spacing: DS.rowGap) {
-                HStack {
-                    Text("Save to")
-                    Spacer()
-                    Button("Choose Folder…") { project.chooseOutputFolder() }.controlSize(.small).disabled(project.tracks.isEmpty || project.busy)
-                }
-                Label {
-                    Text(project.outputFolder?.path ?? "Add files to set the destination")
-                        .font(.caption).lineLimit(2).truncationMode(.middle)
-                        .foregroundStyle(project.outputFolder == nil ? Color.secondary : Color.primary)
-                        .textSelection(.enabled)
-                } icon: {
-                    Image(systemName: "folder").foregroundStyle(.secondary)
-                }
-                if project.outputURL != nil {
-                    HStack(spacing: 6) {
-                        Text("File name")
-                        TextField("", text: Binding(get: { project.outputName }, set: { project.outputName = $0 }), prompt: Text("File name"))
-                            .labelsHidden().textFieldStyle(.roundedBorder).disabled(project.busy)
-                        Text(".\(project.container.rawValue)").foregroundStyle(.secondary).monospaced()
-                    }
-                    .font(.callout)
-                }
-            }
-            if !project.tracks.isEmpty {
-                LabeledContent("Estimated size") { Text(Fmt.bytes(project.estimatedSize)).monospacedDigit() }
-                if let free = project.outputFree {
-                    let need = project.outputNeeded
-                    let fits = free >= need
-                    VStack(alignment: .leading, spacing: 4) {
-                        LabeledContent("Free on that drive") {
-                            Text(Fmt.bytes(free)).monospacedDigit().foregroundStyle(fits ? Color.primary : Color.red)
-                        }
-                        ProgressView(value: min(1, need / max(free, 1))).tint(fits ? (need / free > 0.8 ? .orange : .green) : .red)
-                        Text(fits ? "needs about \(Fmt.bytes(need)) while muxing (temp copy + final file)" : "not enough: about \(Fmt.bytes(need)) is needed while muxing — choose another drive")
-                            .font(.caption).foregroundStyle(fits ? Color.secondary : Color.red).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-            HStack {
-                Button { showQuality = true } label: { Label("Quality & Advanced…", systemImage: "slider.horizontal.3") }
-                    .disabled(project.tracks.isEmpty || project.busy)
-                Spacer()
-            }
-            .sheet(isPresented: $showQuality) { AudioOptionsView() }      // wave 0: AudioOptionsView still draws the old QualitySheet
-            if project.state == .running {
-                RunMonitorView(progress: project.progress, stage: project.stage, folder: project.outputFolder)
-            }
-            DisclosureGroup(isExpanded: $showCommand) {
-                TerminalBox(text: project.commandPreview.isEmpty ? "—" : project.commandPreview, scrolls: false)
-            } label: {
-                Text(project.hdr.encode ? "Commands (for reference)" : "MP4Box command (for reference)").foregroundStyle(.secondary)
-            }
-        } header: {
-            Text("Output")
+        VStack(alignment: .leading, spacing: 3) {
+            CryoFieldLabel(label)
+            Text(value).font(CryoFont.mono(big ? 20 : 14)).foregroundStyle(Cryo.ink).lineLimit(1).minimumScaleFactor(0.7)
+            if let detail { Text(detail).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).lineLimit(2).fixedSize(horizontal: false, vertical: true) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension Container {
+    /// Where a file in this container plays (the Delivery's container summary)
+    var deliveryWhere: String {
+        switch self {
+        case .mov: return "Academy, Resolve"
+        case .mp4: return "TVs, players"
+        case .mkv: return "home theater, Zidoo"
         }
     }
 }
 
-/// Academy prediction for SDR deliveries; for playback versions, where the file will play
+// MARK: - Output
+
+/// Where the file goes: the container (where it will play) with Change…, the name and the folder
+struct OutputSection: View {
+    @Environment(Project.self) private var project
+
+    var body: some View {
+        @Bindable var project = project
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                CryoFieldLabel("Container").frame(width: 82, alignment: .leading)
+                Text(project.container.rawValue.uppercased()).font(CryoFont.title(15)).foregroundStyle(Cryo.ink)
+                Text(project.container.deliveryWhere).font(CryoFont.body(12)).foregroundStyle(Cryo.ink2)
+                Spacer(minLength: 8)
+                Menu {
+                    ForEach(Container.allCases) { c in
+                        Button { project.container = c } label: {
+                            Text("\(c.rawValue.uppercased()) — \(c.deliveryWhere)" + (c == project.container ? "  ✓" : ""))
+                        }
+                    }
+                } label: { Text("Change…") }
+                .menuStyle(.borderlessButton).fixedSize()
+                .disabled(project.busy)
+                .help("Choose where this file will play; every check is done again")
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                CryoFieldLabel("Name").frame(width: 82, alignment: .leading)
+                if project.outputURL != nil {
+                    TextField("", text: Binding(get: { project.outputName }, set: { project.outputName = $0 }), prompt: Text("File name"))
+                        .textFieldStyle(.plain).font(CryoFont.mono(12)).foregroundStyle(Cryo.ink).cryoField()
+                        .disabled(project.busy)
+                    Text(".\(project.container.rawValue)").font(CryoFont.mono(12)).foregroundStyle(Cryo.ink2)
+                } else {
+                    Text("Add the picture to name the file").font(CryoFont.body(12)).foregroundStyle(Cryo.ink3)
+                }
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                CryoFieldLabel("Folder").frame(width: 82, alignment: .leading)
+                Text(project.outputFolder?.path ?? "—").font(CryoFont.mono(11)).foregroundStyle(project.outputFolder == nil ? Cryo.ink3 : Cryo.ink2)
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                Spacer(minLength: 8)
+                Button("Choose…") { project.chooseOutputFolder() }.buttonStyle(CryoButtonStyle())
+                    .disabled(project.tracks.isEmpty || project.busy)
+            }
+        }
+    }
+}
+
+// MARK: - Checks after writing
+
+/// The checks every Delivery runs on the file it wrote, and the Academy / Zidoo seals predicted from the sources
 struct AcademySection: View {
     @Environment(Project.self) private var project
 
     var body: some View {
-        if project.hdr.encode || project.container == .mkv {
-            Section {
-                PlaybackPanel()
-            } header: {
-                Text("Where it plays")
+        let ref = project.reference
+        let twoStep: Bool = { if case .transcode = project.video.choice(project) { return true }; return false }()
+        let bits = project.verifyAudio || project.verifyVideo || twoStep
+        VStack(alignment: .leading, spacing: 10) {
+            CryoFieldLabel("Checks after writing")
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                row(bits, "Bit for bit", bits ? "every copied track against its source" + (twoStep ? ", the picture against the one made in step 1" : "") : "off — turn it on in the inspector")
+                row(ref != nil, "Sync", ref.map { "each audio track against “\($0.title)”" } ?? "no sync reference: skipped")
+                row(project.pictureCheck, "Sound vs picture", project.pictureCheck ? "hard cuts against sound hits, through the film" : "off — turn it on in the inspector")
+                if project.outputAudio.contains(where: { $0.delivery != .copy }) {
+                    row(true, "Transcoded audio", "level, channels, order and sync against the source")
+                }
+                row(true, "Render QC", "every frame of the final file (green, black, frozen frames, clicks…)")
+                row(true, "Academy · Zidoo", "read from the final file")
             }
-        } else {
-            Section {
-                AcademySeal(level: project.predictedLevel, caption: "Predicted from the sources · verified on the final file after muxing", compact: true)
+            HStack(alignment: .top, spacing: 24) {
+                if !academyHidden, let l = project.predictedLevel {
+                    CryoSeal(kind: .academy, passed: l != .notApproved, caption: "Predicted: \(l.title.lowercased())")
+                }
+                if let z = project.predictedZidooLevel {
+                    CryoSeal(kind: .zidoo, passed: z != .noPlay, caption: "Predicted: \(z.title.lowercased())")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 2)
+            if !academyHidden {
                 let fails = project.predictedChecks.filter { $0.level == .fail }
                 ForEach(Array(fails.prefix(3).enumerated()), id: \.offset) { _, c in
-                    Label {
-                        Text("\(c.title): \(c.detail)").font(.caption).fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-                    }
+                    DeliveryLineRow(level: .fail, text: "Academy · \(c.title): \(c.detail)")
                 }
-            } header: {
-                Text("Academy specs")
             }
         }
-        Section {
-            ZidooSeal(level: project.predictedZidooLevel, caption: "Predicted from the sources · " + Zidoo.caveat, compact: true)
-            let issues = project.predictedZidooChecks.filter { $0.level == .fail || $0.level == .warn }
-            ForEach(Array(issues.prefix(3).enumerated()), id: \.offset) { _, c in
-                Label {
-                    Text("\(c.title): \(c.detail)").font(.caption).fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: c.level.icon).foregroundStyle(c.level.color)
-                }
-            }
-        } header: {
-            Text("Zidoo (screening room)")
+    }
+
+    /// A playback version (HEVC HDR) or an MKV isn't an Academy screening file
+    var academyHidden: Bool { project.video.choice(project) == .hevcHDR || project.container == .mkv }
+
+    @ViewBuilder func row(_ on: Bool, _ title: String, _ detail: String) -> some View {
+        GridRow {
+            CryoLamp(on ? Cryo.ice : Cryo.s3, size: 7)
+            Text(title).font(CryoFont.body(12)).foregroundStyle(on ? Cryo.ink : Cryo.ink3)
+            Text(detail).font(CryoFont.body(11)).foregroundStyle(Cryo.ink2).fixedSize(horizontal: false, vertical: true)
         }
     }
 }
 
-/// What goes in and what comes out, track by track
+// MARK: - The stream plan
+
+/// What goes into the file, stream by stream, on its signal line: straight for COPY, an amber node for TRANSCODE;
+/// what stays out is said too ("not in the file · sync reference")
 struct SummarySections: View {
     @Environment(Project.self) private var project
 
     var body: some View {
-        let inc = project.included
-        let ref = project.reference
-        let audiosOut = inc.filter { $0.kind == .audio }
-        let video = inc.first { $0.kind == .video }
-        Section {
-            if let v = video { KeyValueRow(label: "Video", value: videoLine(v), chip: v.bitDepth > 0 ? "\(v.bitDepth)-bit" : nil) }
-            ForEach(Array(project.tracks.filter { $0.kind == .audio && ($0.include || $0.id == ref?.id) }.enumerated()), id: \.offset) { _, a in
-                KeyValueRow(label: a.id == ref?.id ? "Reference" : "Audio", value: audioLine(a), chip: a.quality.text, chipTint: a.quality.lossless ? .green : .orange)
+        let choice = project.video.choice(project)
+        VStack(alignment: .leading, spacing: 8) {
+            CryoFieldLabel("Streams")
+            if let v = project.videoTrack { videoRow(v, choice) }
+            ForEach(Array(project.outputAudio.enumerated()), id: \.element.id) { i, a in audioRow(a, slot: i + 1) }
+            ForEach(Array(project.tracks.filter { $0.include && $0.kind == .subtitle }.enumerated()), id: \.element.id) { i, s in
+                line("S\(i + 1)", .copy, "COPY · bit-exact", "Subtitles “\(s.title)” · \(s.codecName) · \(Languages.name(s.language))")
             }
-        } header: {
-            Text("Input")
-        }
-        Section {
-            if video != nil, let e = project.encodePlan {
-                KeyValueRow(label: "Video", value: "HEVC Main 10 · \(e.width)×\(e.height) · \(Probe.fps("\(e.fps.num)/\(e.fps.den)") ?? "") fps · 10-bit 4:2:0 · \(e.formats)",
-                            chip: "Re-encoded for playback", chipTint: .orange)
-                KeyValueRow(label: "Color tags", value: e.outputColor.text + (e.hdr.map { " · HDR10 \($0.mastering.text)" } ?? ""))
-            } else if let v = video {
-                KeyValueRow(label: "Video", value: videoLine(v), chip: "Identical (no re-encode)", chipTint: .green)
-                KeyValueRow(label: "Color tags", value: colorLine(v))
+            ForEach(project.tracks.filter { $0.include && $0.kind == .timecode }) { t in
+                if project.container == .mkv { left("TC", "Timecode — MKV has no timecode track: left out") }
+                else { line("TC", .copy, "COPY · bit-exact", "Timecode " + (project.videoTrack?.source?.timecode ?? "")) }
             }
-            LabeledContent("Audio tracks") { Text("\(audiosOut.count)") }
-            ForEach(Array(audiosOut.enumerated()), id: \.offset) { i, a in
-                KeyValueRow(label: "Audio \(i + 1)", value: audioLine(a) + outAudioExtra(a),
-                            chip: (project.planText(for: a) != nil ? "Identical + trimmed" : "Identical (bit-exact)") + (a.channelPermutation != nil ? " + reordered" : ""), chipTint: .green)
+            ForEach(project.tracks.filter { !$0.include && $0.kind != .video }) { t in
+                left("—", outText(t))
             }
-        } header: {
-            Text("Output · \(project.container.rawValue.uppercased()) · ~\(Fmt.bytes(project.estimatedSize))")
+            if case .transcode = choice, let p = DeliveryEngine.step1Plan(project) {
+                DeliveryAmberBox(title: "TRANSCODE OF THE PICTURE · STEP 1",
+                                 text: "\(p.source.codecName) → \(p.outputCodecName) · \(p.outputBits)-bit \(p.outputChroma) · \(p.outputWidth)×\(p.outputHeight) — you chose it on the Video tab. Step 1 writes the new picture; step 2 copies it bit for bit into this file with the sound.")
+                    .padding(.top, 4)
+            } else if choice == .hevcHDR, let e = project.encodePlan {
+                DeliveryAmberBox(title: "TRANSCODE OF THE PICTURE",
+                                 text: "\(e.source.codecName) → \(e.outputCodecName) · \(e.formats) · \(e.outputWidth)×\(e.outputHeight)" +
+                                       (project.hdr.dvSource != nil ? " — so the Dolby Vision metadata can go in (the picture as it came can't carry it)." : " — you chose it on the Video tab.") +
+                                       (e.colourNote.map { " Colour: \($0)." } ?? ""))
+                    .padding(.top, 4)
+            }
+            let audioT = project.outputAudio.filter { $0.delivery != .copy }
+            if !audioT.isEmpty {
+                DeliveryAmberBox(title: "TRANSCODE OF THE AUDIO",
+                                 text: audioT.map { "“\($0.title)”: \($0.codecName) → \(DeliveryReport.audioRole($0, $0.delivery))" }.joined(separator: " · ") +
+                                       " — chosen on the Audio tab. Level, channels, order and sync stay the same, and are checked after writing.")
+            }
         }
     }
 
-    func videoLine(_ v: Track) -> String {
-        var parts = [v.codecName + (v.mi?["Format_Profile"].flatMap { v.codecName.contains($0) ? nil : " \($0)" } ?? "")]
-        if let w = v.mi?["Width"], let h = v.mi?["Height"] { parts.append("\(w)×\(h)") }
-        if let fr = v.mi?["FrameRate"] { parts.append("\(fr) fps") }
-        let chroma = v.mi?["ChromaSubsampling"].map { " \($0)" } ?? ""
-        if v.bitDepth > 0 { parts.append("\(v.bitDepth)-bit\(chroma)") }
-        if v.bitRate > 0 { parts.append(Fmt.bitrate(v.bitRate)) }
-        return parts.joined(separator: " · ")
-    }
-    func audioLine(_ a: Track) -> String {
-        var parts = [a.codecName]
-        if a.sampleRate > 0 { parts.append(Fmt.hz(a.sampleRate)) }
-        if a.bitDepth > 0 && a.isPCM { parts.append("\(a.bitDepth)-bit") }
-        parts.append("\(a.channels) ch")
-        if a.bitRate > 0 { parts.append(Fmt.bitrate(a.bitRate) + (a.mi?["BitRate_Mode"] == "CBR" ? " CBR" : "")) }
-        if let ci = a.mi?["ComplexityIndex"] { parts.append("CI \(ci)") }
-        return parts.joined(separator: " · ")
-    }
-    func outAudioExtra(_ a: Track) -> String {
-        guard a.isPCM else { return "" }
-        if project.container == .mov, let tag = a.outputLayoutTag(writeLabels: project.writeChannelMap) {
-            return " · " + ChannelMap.layoutName(tag)
+    func videoRow(_ v: Track, _ choice: VideoPlanModel.Choice) -> some View {
+        let desc = [v.codecName, v.mi?["Width"].flatMap { w in v.mi?["Height"].map { "\(w)×\($0)" } }, v.mi?["FrameRate"].map { "\($0) fps" }, v.bitDepth > 0 ? "\(v.bitDepth)-bit" : nil]
+            .compactMap { $0 }.joined(separator: " · ")
+        switch choice {
+        case .copy: return line("V", .copy, "COPY · bit-exact", desc)
+        case .hevcHDR: return line("V", .transcode, "TRANSCODE → HEVC 10-bit", desc + " → " + project.hdr.formatsText)
+        case .transcode(let s): return line("V", .transcode, "TRANSCODE → " + (TranscodePreset(rawValue: s.preset)?.label.components(separatedBy: " — ").first ?? s.preset), desc + " · step 1, then copied")
         }
-        return " · no channel labels"
     }
-    func colorLine(_ v: Track) -> String {
-        if project.fixColorTag { return "BT.709 / BT.709 / BT.709 (tag corrected)" }
-        let p = v.mi?["colour_primaries"] ?? "—", t = v.mi?["transfer_characteristics"] ?? (v.mi?["Gamma"].map { "Gamma \($0)" } ?? "—"), m = v.mi?["matrix_coefficients"] ?? "—"
-        return "\(p) / \(t) / \(m) (primaries / transfer / matrix)"
+
+    func audioRow(_ a: Track, slot: Int) -> some View {
+        var desc = [a.codecName, Probe.channelText(a.channels, a.channelLayout), a.sampleRate > 0 ? Fmt.hz(a.sampleRate) : nil].compactMap { $0 }.joined(separator: " · ")
+        desc = "“\(a.title)” · " + desc
+        var extra: [String] = []
+        if a.id == project.reference?.id { extra.append("sync reference") }
+        if project.planText(for: a) != nil { extra.append(a.trimStart != 0 ? String(format: "head trim %.1f ms", a.trimStartMs) : "trimmed to the picture") }
+        if a.channelPermutation != nil { extra.append("channels reordered") }
+        if a.isGroup { extra.append("\(a.members.count) monos joined") }
+        let word = a.delivery == .copy ? "COPY · bit-exact" : "TRANSCODE → " + DeliveryReport.audioRole(a, a.delivery)
+        return line("A\(slot)", a.delivery == .copy ? .copy : .transcode, word, desc + (extra.isEmpty ? "" : " · " + extra.joined(separator: " · ")))
+    }
+
+    func outText(_ t: Track) -> String {
+        let from = project.isEmbedded(t) ? " from the video" : ""
+        let ref = t.id == project.reference?.id ? " · sync reference" : ""
+        let pending = t.kind == .audio && project.isEmbedded(t) && project.embeddedAudioAnswer[project.key(of: t)] == nil ? " · DECIDE on the Audio tab" : ""
+        return "\(t.kind.label) “\(t.title)”\(from) · not in the file\(ref)\(pending)"
+    }
+
+    func line(_ label: String, _ touch: FileTouch, _ word: String, _ desc: String) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(label).font(CryoFont.mono(12)).foregroundStyle(Cryo.ink).frame(width: 28, alignment: .leading)
+            CryoSignalLine(touch: touch).frame(width: 64)
+            CryoChip(word, style: touch == .transcode ? .amber : .lit)
+            Text(desc).font(CryoFont.body(12)).foregroundStyle(Cryo.ink2).lineLimit(2).truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+    }
+
+    func left(_ label: String, _ desc: String) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(label).font(CryoFont.mono(12)).foregroundStyle(Cryo.ink3).frame(width: 28, alignment: .leading)
+            Rectangle().fill(Cryo.s3).frame(width: 64, height: 1)
+            Text(desc).font(CryoFont.body(12)).foregroundStyle(Cryo.ink3).lineLimit(2)
+            Spacer(minLength: 0)
+        }
     }
 }
 
-// MARK: - Sheets
+// MARK: - Result
+
+/// The end of a Delivery: the seals read from the final file, what the checks said, and where to go next.
+/// Without an item it shows the window's own last run (the old in-window mux).
+struct ResultBanner: View {
+    @Environment(Project.self) private var project
+    var item: DeliveryItem? = nil
+    var onClose: (() -> Void)? = nil
+    @State private var showLog = false
+    @State private var showAll = false
+
+    var body: some View {
+        if let m = model {
+            CryoSlot {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: m.level.icon).font(.system(size: 18, weight: .semibold)).foregroundStyle(deliveryColor(m.level))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(m.title).font(CryoFont.title(16)).foregroundStyle(Cryo.ink)
+                            if let o = m.output { Text(o.path).font(CryoFont.mono(11)).foregroundStyle(Cryo.ink2).lineLimit(1).truncationMode(.middle).textSelection(.enabled) }
+                        }
+                        Spacer(minLength: 8)
+                        Text(m.word).font(CryoFont.label(11)).tracking(1).foregroundStyle(deliveryColor(m.level))
+                        if let onClose { Button { onClose() } label: { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundStyle(Cryo.ink3).help("Close") }
+                    }
+                    if m.academy != nil || m.zidoo != nil {
+                        HStack(alignment: .top, spacing: 28) {
+                            if let a = m.academy { CryoSeal(kind: .academy, passed: a != .notApproved, caption: a.title + " · verified on the final file") }
+                            if let z = m.zidoo { CryoSeal(kind: .zidoo, passed: z != .noPlay, caption: z.title + " · " + Zidoo.caveat) }
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    let all = m.lines.filter { $0 != m.title && $0 != "Cancelled — nothing was written to the destination." }
+                    let lines = showAll ? all : Array(all.prefix(10))
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, l in DeliveryLineRow(level: deliveryLevel(of: l), text: l) }
+                        if all.count > 10 {
+                            Button(showAll ? "Show fewer" : "Show all \(all.count) lines") { showAll.toggle() }.buttonStyle(.plain).font(CryoFont.body(11)).foregroundStyle(Cryo.ice)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        if let url = m.output, FileManager.default.fileExists(atPath: url.path) {
+                            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }.buttonStyle(CryoGoButtonStyle(.done))
+                            Button("Inspect Final File") { project.inspector.load(url); project.mode = .inspect }.buttonStyle(CryoButtonStyle())
+                            Button("Render QC") { RenderQCModel.shared.open(url); project.mode = .qc }.buttonStyle(CryoButtonStyle())
+                        }
+                        if m.output != nil, let r = m.report, FileManager.default.fileExists(atPath: r.path) {
+                            Button("How This File Was Made") { NSWorkspace.shared.open(r) }.buttonStyle(CryoButtonStyle())
+                                .help(r.path)
+                        }
+                        if m.log != nil || m.logURL != nil { Button("Log") { showLog = true }.buttonStyle(CryoButtonStyle()) }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .sheet(isPresented: $showLog) { LogSheet(title: "Render log", text: m.logURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? m.log ?? "") }
+        }
+    }
+
+    struct Model {
+        var level: CheckLevel; var word: String; var title: String; var output: URL?; var lines: [String]
+        var academy: AcademyLevel?; var zidoo: ZidooLevel?; var report: URL?; var log: String?
+        var logURL: URL? = nil
+    }
+
+    var model: Model? {
+        if let item {
+            let r = DeliveryQueue.shared.results[item.id]
+            let logURL = DeliveryQueue.shared.logFile(item.id)
+            let name = item.output?.lastPathComponent ?? item.job.name
+            var m = Model(level: .info, word: "", title: "", output: item.output, lines: item.resultLines,
+                          academy: r?.academy.flatMap(AcademyLevel.init(deliveryKey:)), zidoo: r?.zidoo.flatMap(ZidooLevel.init(deliveryKey:)),
+                          report: r?.report.map { URL(fileURLWithPath: $0) }, log: nil,
+                          logURL: FileManager.default.fileExists(atPath: logURL.path) ? logURL : nil)
+            switch item.state {
+            case .done: m.level = .ok; m.word = "PASS"; m.title = "Done — \(name)"
+            case .warning: m.level = .warn; m.word = "ATTENTION"; m.title = "Written, with warnings — \(name)"
+            case .failed:
+                m.level = .fail; m.word = "FAIL"
+                m.title = item.output != nil ? "Written, but a check failed — \(name)" : "That didn't work — \(item.job.name)"
+            case .cancelled: m.level = .info; m.word = "CANCELLED"; m.title = "Cancelled — nothing was written to the destination"
+            case .queued, .running: return nil
+            }
+            if item.job.video.choice == "hevcHDR" || item.job.container == "mkv" { m.academy = nil }
+            return m
+        }
+        switch project.state {
+        case .done(let url):
+            let s = project.resultState
+            let insp = project.resultInspection
+            return Model(level: s == .ok ? .ok : s == .warning ? .warn : .fail, word: s == .ok ? "PASS" : s == .warning ? "ATTENTION" : "FAIL",
+                         title: s == .ok ? "Done — \(url?.lastPathComponent ?? "")" : s == .warning ? "Written, with warnings" : "Written, but a check failed",
+                         output: url, lines: project.resultLines, academy: project.hdr.encode || project.container == .mkv ? nil : insp?.level, zidoo: insp?.zidooLevel,
+                         report: nil, log: project.log)
+        case .failed:
+            return Model(level: .fail, word: "FAIL", title: "That didn't work", output: nil, lines: project.resultLines, academy: nil, zidoo: nil, report: nil, log: project.log)
+        case .cancelled:
+            return Model(level: .info, word: "CANCELLED", title: "Cancelled — nothing was written to the destination", output: nil, lines: [], academy: nil, zidoo: nil, report: nil, log: nil)
+        default:
+            return nil
+        }
+    }
+}
+
+// MARK: - Log
 
 struct LogSheet: View {
     @Environment(Project.self) private var project
     @Environment(\.dismiss) private var dismiss
+    var title: String = "Log"
+    var text: String? = nil
+
     var body: some View {
-        VStack(spacing: 0) {
-            SheetHeader(title: "MP4Box Log") { EmptyView() }
-            TerminalBox(text: project.log).padding(.horizontal, 20).padding(.top, 8)
-            HStack {
-                Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(project.log, forType: .string) }
-                Spacer()
-                Button("Close") { dismiss() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+        let t = text ?? project.log
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased()).font(CryoFont.label(12)).tracking(1.2).foregroundStyle(Cryo.ink2)
+            ScrollView([.vertical, .horizontal]) {
+                Text(t.isEmpty ? "—" : t).font(CryoFont.mono(11)).foregroundStyle(Cryo.ink2).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(10)
             }
-            .padding(20)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Cryo.s0))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Cryo.s3, lineWidth: 1))
+            HStack {
+                Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(t, forType: .string) }.buttonStyle(CryoButtonStyle())
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.defaultAction).buttonStyle(CryoGoButtonStyle(.primary))
+            }
         }
+        .padding(20)
         .frame(width: 760, height: 480)
+        .background(Cryo.s1)
     }
 }
